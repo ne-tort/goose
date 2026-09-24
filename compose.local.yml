@@ -1,0 +1,37 @@
+# Self-hosted GitHub Actions runner for the goose repo, running in Docker Desktop.
+#
+# First-time registration (runner token is valid ~1 hour, get a fresh one with):
+#   RUNNER_TOKEN=$(gh api -X POST repos/ne-tort/goose/actions/runners/registration-token --jq .token)
+#   RUNNER_TOKEN=$RUNNER_TOKEN docker compose -f compose.local.yml up -d
+#
+# Subsequent starts (token is persisted in the named volume):
+#   docker compose -f compose.local.yml up -d
+services:
+  runner:
+    image: ghcr.io/actions/actions-runner:latest
+    container_name: goose-gh-runner
+    restart: unless-stopped
+    environment:
+      REPO_URL: https://github.com/ne-tort/goose
+      RUNNER_NAME: goose-docker-runner
+      RUNNER_WORKDIR: /home/runner/work
+      # Required only for first-time registration; set via shell:
+      #   RUNNER_TOKEN=$(gh api -X POST repos/ne-tort/goose/actions/runners/registration-token --jq .token)
+      RUNNER_TOKEN: ${RUNNER_TOKEN:?RUNNER_TOKEN is required for first-time registration}
+      # Docker executor so CI jobs can use `docker` inside the runner
+      DOCKER_HOST: unix:///var/run/docker.sock
+    volumes:
+      # Persist runner registration and work directory across restarts
+      - gh-runner-data:/home/runner
+      # Let the runner run sibling containers via Docker Desktop's host socket
+      - /var/run/docker.sock:/var/run/docker.sock
+    entrypoint: ["/bin/bash", "-lc"]
+    command:
+      - |
+        if [ ! -f /home/runner/.runner ]; then
+          ./config.sh --url "$$REPO_URL" --token "$$RUNNER_TOKEN" --name "$$RUNNER_NAME" --work "$$RUNNER_WORKDIR" --unattended --replace --labels docker
+        fi
+        exec ./run.sh
+
+volumes:
+  gh-runner-data:
