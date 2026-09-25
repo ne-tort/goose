@@ -14,12 +14,13 @@ use crate::agents::extension::ExtensionConfig;
 use crate::agents::extension_manager::{ExtensionManager, ExtensionManagerCapabilities};
 use crate::agents::mcp_client::McpClientTrait;
 use crate::agents::prompt_manager::PromptManager;
+use crate::agents::provider_retry::{ProviderRetryPolicy, RetryLimit};
 use crate::agents::state_machine::{
     BangShellOperation, CompactionOperation, DoctorOperation, Emitter, EntryHookOperation,
     ExitOnErrorOperation, GooseEffect, GooseInferenceProvider, GooseInferenceRequestPreparer,
-    InferenceRunner, MaxTurnsOperation, Operation, ProjectOperation, RecipeOperation,
-    RetryOperation, SkillOperation, SlashCommandOperation, StateMachine, StatusOperation,
-    SteerOperation, SteerQueue, Step, StopHookOperation, ToolApprovalOperation,
+    InferenceRunner, MaxTurnsOperation, Operation, ProjectOperation, ProviderErrorRetryOperation,
+    RecipeOperation, RetryOperation, SkillOperation, SlashCommandOperation, StateMachine,
+    StatusOperation, SteerOperation, SteerQueue, Step, StopHookOperation, ToolApprovalOperation,
     ToolExecutionOperation, ToolPairCompactionOperation, UnknownToolOperation,
 };
 use crate::agents::AgentEvent;
@@ -103,6 +104,7 @@ pub(super) struct TestPipeline {
     working_dir: std::path::PathBuf,
     steer_queue: SteerQueue,
     max_turns: u32,
+    provider_retry_policy: ProviderRetryPolicy,
     scheduler: Option<Arc<crate::scheduler::Scheduler>>,
     _temp_dir: Arc<tempfile::TempDir>,
 }
@@ -157,6 +159,7 @@ impl TestPipeline {
                 self.hook_manager.clone(),
             )),
             Arc::new(UnknownToolOperation::new(self.hook_manager.clone())),
+            Arc::new(ProviderErrorRetryOperation::new(self.provider_retry_policy)),
             Arc::new(RetryOperation::new(
                 &self.goal,
                 &self.grind,
@@ -250,6 +253,11 @@ impl TestPipeline {
 
     pub(super) fn with_max_turns(mut self, max_turns: u32) -> Self {
         self.max_turns = max_turns;
+        self
+    }
+
+    pub(super) fn with_provider_retry_policy(mut self, policy: ProviderRetryPolicy) -> Self {
+        self.provider_retry_policy = policy;
         self
     }
 
@@ -817,6 +825,10 @@ async fn build_test_pipeline(
         working_dir: session.working_dir.clone(),
         steer_queue: Arc::new(tokio::sync::Mutex::new(VecDeque::new())),
         max_turns: MAX_TURNS,
+        provider_retry_policy: ProviderRetryPolicy {
+            max_retries: RetryLimit::Finite(2),
+            interval: std::time::Duration::ZERO,
+        },
         scheduler,
         _temp_dir: temp_dir,
     };

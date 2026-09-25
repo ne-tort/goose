@@ -65,6 +65,16 @@ struct ApiRule {
     matcher: ApiMatcher,
     response: ApiResponse,
     gate: Option<ResponseGate>,
+    failures: Option<Failures>,
+}
+
+/// Serves `response` for the first `remaining` matching calls before the
+/// rule's regular response takes over, so retry tests can fail a bounded
+/// number of times and then succeed.
+#[derive(Clone)]
+struct Failures {
+    response: ApiResponse,
+    remaining: Arc<AtomicUsize>,
 }
 
 enum ApiMatcher {
@@ -235,6 +245,7 @@ impl DummyApi {
             matcher,
             response,
             gate: None,
+            failures: None,
         });
         rules.len() - 1
     }
@@ -244,6 +255,7 @@ impl DummyApi {
             matcher,
             response,
             gate: Some(gate),
+            failures: None,
         });
     }
 }
@@ -410,7 +422,7 @@ impl<'a> ConfiguredResponse<'a> {
         self
     }
 
-    pub(super) fn server_error(self, error: impl Into<String>) -> &'a DummyApi {
+    pub(super) fn server_error(self, error: impl Into<String>) -> Self {
         let mut rules = self.api.state.rules.lock().unwrap();
         let response = &mut rules[self.rule].response;
         let ApiResponse::Reply(reply) = response else {
@@ -420,6 +432,25 @@ impl<'a> ConfiguredResponse<'a> {
             reply: std::mem::take(reply),
             error: error.into(),
         };
+        self
+    }
+
+    /// Serves the response configured so far for the first `failures` matching
+    /// calls, then switches this rule to `reply` — the retry tests need a
+    /// provider that recovers instead of failing forever.
+    pub(super) fn reply_after_failures(
+        self,
+        failures: usize,
+        reply: impl Into<String>,
+    ) -> &'a DummyApi {
+        let mut rules = self.api.state.rules.lock().unwrap();
+        let rule = &mut rules[self.rule];
+        let failure_response = rule.response.clone();
+        rule.response = ApiResponse::Reply(reply.into());
+        rule.failures = Some(Failures {
+            response: failure_response,
+            remaining: Arc::new(AtomicUsize::new(failures)),
+        });
         self.api
     }
 }
@@ -455,7 +486,17 @@ impl DummyApiState {
                 .unwrap_or_else(|| {
                     panic!("dummy API has no rule matching input {input:?}, system {system:?}")
                 });
-            (rule.response.clone(), rule.gate.clone())
+            let failure = rule
+                .failures
+                .as_ref()
+                .filter(|failures| failures.remaining.load(Ordering::SeqCst) > 0);
+            match failure {
+                Some(failures) => {
+                    failures.remaining.fetch_sub(1, Ordering::SeqCst);
+                    (failures.response.clone(), rule.gate.clone())
+                }
+                None => (rule.response.clone(), rule.gate.clone()),
+            }
         };
         if let Some(gate) = gate {
             gate.block();

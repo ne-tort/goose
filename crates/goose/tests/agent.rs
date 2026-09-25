@@ -3350,6 +3350,13 @@ mod tests {
 
         #[async_trait]
         impl Provider for EmptyThenTextProvider {
+            fn retry_config(&self) -> goose_providers::retry::RetryConfig {
+                goose_providers::retry::RetryConfig {
+                    max_retries: 0,
+                    ..Default::default()
+                }
+            }
+
             async fn stream(
                 &self,
                 _model_config: &ModelConfig,
@@ -4119,6 +4126,634 @@ mod tests {
                 .find(|message| message.as_concat_text().contains("Maximum retry attempts"))
                 .expect("max-retry failure message should be stored");
             assert_eq!(stored_failure.id.as_deref(), Some(emitted_failure_id));
+            Ok(())
+        }
+    }
+
+    mod provider_error_tests {
+        use super::*;
+        use async_trait::async_trait;
+        use goose::agents::{AgentEvent, SessionConfig};
+        use goose::config::GooseMode;
+        use goose::conversation::message::{Message, MessageContent, SystemNotificationType};
+        use goose::providers::base::{
+            stream_from_single_message, MessageStream, Provider, ProviderDef, ProviderMetadata,
+        };
+        use goose::session::session_manager::SessionType;
+        use goose_providers::conversation::token_usage::{ProviderUsage, Usage};
+        use goose_providers::errors::ProviderError;
+        use goose_providers::model::ModelConfig;
+        use std::path::PathBuf;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        fn usage() -> ProviderUsage {
+            ProviderUsage::new(
+                "mock-model".to_string(),
+                Usage::new(Some(10), Some(5), Some(15)),
+            )
+        }
+
+        /// Fails with `error` for the first `fail_count` provider calls, then
+        /// returns a normal text response. `fail_count = usize::MAX` never
+        /// succeeds.
+        struct ErrorThenTextProvider {
+            call_count: AtomicUsize,
+            fail_count: usize,
+            error: ProviderError,
+        }
+
+        impl ErrorThenTextProvider {
+            fn new(fail_count: usize, error: ProviderError) -> Self {
+                Self {
+                    call_count: AtomicUsize::new(0),
+                    fail_count,
+                    error,
+                }
+            }
+
+            fn calls(&self) -> usize {
+                self.call_count.load(Ordering::SeqCst)
+            }
+        }
+
+        impl goose::providers::base::ProviderDescriptor for ErrorThenTextProvider {
+            fn metadata() -> ProviderMetadata {
+                ProviderMetadata {
+                    name: "error-then-text-mock".to_string(),
+                    display_name: "Error Then Text Mock".to_string(),
+                    description: "Mock provider for provider-error retry tests".to_string(),
+                    default_model: "mock-model".to_string(),
+                    known_models: vec![],
+                    model_doc_link: "".to_string(),
+                    config_keys: vec![],
+                    setup_steps: vec![],
+                    setup: None,
+                    deprecated: None,
+                }
+            }
+        }
+
+        impl ProviderDef for ErrorThenTextProvider {
+            type Provider = Self;
+
+            fn from_env(
+                _extensions: Vec<goose::config::ExtensionConfig>,
+                _tls_config: Option<goose::providers::api_client::TlsConfig>,
+            ) -> futures::future::BoxFuture<'static, anyhow::Result<Self>> {
+                unimplemented!()
+            }
+        }
+
+        #[async_trait]
+        impl Provider for ErrorThenTextProvider {
+            fn retry_config(&self) -> goose_providers::retry::RetryConfig {
+                goose_providers::retry::RetryConfig {
+                    max_retries: 0,
+                    ..Default::default()
+                }
+            }
+
+            async fn stream(
+                &self,
+                _model_config: &ModelConfig,
+                _system_prompt: &str,
+                _messages: &[Message],
+                _tools: &[rmcp::model::Tool],
+            ) -> Result<MessageStream, ProviderError> {
+                let call = self.call_count.fetch_add(1, Ordering::SeqCst);
+                if call < self.fail_count {
+                    Err(self.error.clone())
+                } else {
+                    Ok(stream_from_single_message(
+                        Message::assistant().with_text("All done."),
+                        usage(),
+                    ))
+                }
+            }
+
+            fn get_name(&self) -> &str {
+                "error-then-text-mock"
+            }
+        }
+
+        /// Yields empty responses for the first `empty_count` provider calls,
+        /// then a normal text response (legacy-path companion of
+        /// `empty_turn_tests::EmptyThenTextProvider` under an explicit retry
+        /// policy).
+        struct EmptyThenTextProvider {
+            call_count: AtomicUsize,
+            empty_count: usize,
+        }
+
+        impl EmptyThenTextProvider {
+            fn new(empty_count: usize) -> Self {
+                Self {
+                    call_count: AtomicUsize::new(0),
+                    empty_count,
+                }
+            }
+
+            fn calls(&self) -> usize {
+                self.call_count.load(Ordering::SeqCst)
+            }
+        }
+
+        impl goose::providers::base::ProviderDescriptor for EmptyThenTextProvider {
+            fn metadata() -> ProviderMetadata {
+                ProviderMetadata {
+                    name: "empty-policy-mock".to_string(),
+                    display_name: "Empty Policy Mock".to_string(),
+                    description: "Mock provider for empty-turn policy tests".to_string(),
+                    default_model: "mock-model".to_string(),
+                    known_models: vec![],
+                    model_doc_link: "".to_string(),
+                    config_keys: vec![],
+                    setup_steps: vec![],
+                    setup: None,
+                    deprecated: None,
+                }
+            }
+        }
+
+        impl ProviderDef for EmptyThenTextProvider {
+            type Provider = Self;
+
+            fn from_env(
+                _extensions: Vec<goose::config::ExtensionConfig>,
+                _tls_config: Option<goose::providers::api_client::TlsConfig>,
+            ) -> futures::future::BoxFuture<'static, anyhow::Result<Self>> {
+                unimplemented!()
+            }
+        }
+
+        #[async_trait]
+        impl Provider for EmptyThenTextProvider {
+            fn retry_config(&self) -> goose_providers::retry::RetryConfig {
+                goose_providers::retry::RetryConfig {
+                    max_retries: 0,
+                    ..Default::default()
+                }
+            }
+
+            async fn stream(
+                &self,
+                _model_config: &ModelConfig,
+                _system_prompt: &str,
+                _messages: &[Message],
+                _tools: &[rmcp::model::Tool],
+            ) -> Result<MessageStream, ProviderError> {
+                let call = self.call_count.fetch_add(1, Ordering::SeqCst);
+                if call < self.empty_count {
+                    Ok(stream_from_single_message(Message::assistant(), usage()))
+                } else {
+                    Ok(stream_from_single_message(
+                        Message::assistant().with_text("All done."),
+                        usage(),
+                    ))
+                }
+            }
+
+            fn get_name(&self) -> &str {
+                "empty-policy-mock"
+            }
+        }
+
+        /// Runs a reply to completion on the legacy loop and returns the
+        /// messages yielded to the caller plus the persisted conversation.
+        /// `env` entries are locked for the duration of the run (legacy path +
+        /// retry policy + zero retry interval).
+        async fn run_reply(
+            provider: Arc<dyn Provider>,
+            session_name: &str,
+            env: &[(&str, Option<&str>)],
+        ) -> Result<(Vec<Message>, Vec<Message>)> {
+            let mut vars: Vec<(&str, Option<&str>)> = vec![
+                ("GOOSE_STATE_MACHINE", None),
+                ("GOOSE_PROVIDER_RETRY_INTERVAL_SECONDS", Some("0")),
+                ("GOOSE_DISABLE_SESSION_NAMING", Some("true")),
+            ];
+            vars.extend_from_slice(env);
+            let _guard = env_lock::lock_env(vars);
+
+            let agent = Agent::new();
+            let session = agent
+                .config
+                .session_manager
+                .create_session(
+                    PathBuf::default(),
+                    session_name.to_string(),
+                    SessionType::Hidden,
+                    GooseMode::default(),
+                )
+                .await?;
+            agent
+                .update_provider(provider, ModelConfig::new("mock-model"), &session.id)
+                .await?;
+
+            let session_id = session.id.clone();
+            let session_config = SessionConfig {
+                id: session.id,
+                schedule_id: None,
+                max_turns: Some(50),
+                retry_config: None,
+            };
+
+            let reply_stream = agent
+                .reply(
+                    Message::user().with_text("Hi"),
+                    session_config,
+                    goose::agents::state_machine::enabled(),
+                    None,
+                )
+                .await?;
+            tokio::pin!(reply_stream);
+
+            let mut messages = Vec::new();
+            while let Some(event) = reply_stream.next().await {
+                if let AgentEvent::Message(m) = event? {
+                    messages.push(m);
+                }
+            }
+
+            let persisted = agent
+                .config
+                .session_manager
+                .get_session(&session_id, true)
+                .await?
+                .conversation
+                .map(|c| c.messages().to_vec())
+                .unwrap_or_default();
+
+            Ok((messages, persisted))
+        }
+
+        fn concat_text(messages: &[Message]) -> String {
+            messages
+                .iter()
+                .flat_map(|m| m.content.iter())
+                .filter_map(|c| match c {
+                    MessageContent::Text(t) => Some(t.text.clone()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        }
+
+        fn progress_messages(messages: &[Message]) -> Vec<&str> {
+            messages
+                .iter()
+                .flat_map(|m| m.content.iter())
+                .filter_map(|c| match c {
+                    MessageContent::SystemNotification(n)
+                        if n.notification_type == SystemNotificationType::ProgressMessage =>
+                    {
+                        Some(n.msg.as_str())
+                    }
+                    _ => None,
+                })
+                .collect()
+        }
+
+        /// A transient NetworkError on the first call is retried and recovers,
+        /// delivering the real response with no error text.
+        #[tokio::test]
+        async fn provider_error_network_error_retries_then_recovers() -> Result<()> {
+            let provider = Arc::new(ErrorThenTextProvider::new(
+                1,
+                ProviderError::NetworkError("connection reset".to_string()),
+            ));
+            let (messages, persisted) =
+                run_reply(provider.clone(), "provider-error-network-recover", &[]).await?;
+
+            assert_eq!(
+                provider.calls(),
+                2,
+                "one failed call plus one successful retry"
+            );
+            let text = concat_text(&messages);
+            assert!(
+                text.contains("All done."),
+                "expected the recovery text, got: {text:?}"
+            );
+            assert!(
+                !text.contains("Network error"),
+                "a recovered retry must not surface the error: {text:?}"
+            );
+            assert!(
+                !text.contains("Please resend your message to try again"),
+                "the exhausted-retry fallback must not appear: {text:?}"
+            );
+            let progress = progress_messages(&messages);
+            assert!(
+                progress.iter().any(|msg| {
+                    msg.contains("Network error") && msg.contains("retrying") && msg.contains("1/3")
+                }),
+                "expected a retry progress notification, got: {progress:?}"
+            );
+            assert!(
+                !persisted
+                    .iter()
+                    .any(|m| m.as_concat_text().contains("Network error")),
+                "intermediate retried errors must not be persisted: {persisted:?}"
+            );
+            Ok(())
+        }
+
+        /// With a low retry budget and a provider that always fails with a
+        /// NetworkError, the retry budget is exhausted and today's user-facing
+        /// fallback message surfaces.
+        #[tokio::test]
+        async fn provider_error_network_error_exhaustion_surfaces_fallback() -> Result<()> {
+            let provider = Arc::new(ErrorThenTextProvider::new(
+                usize::MAX,
+                ProviderError::NetworkError("connection reset".to_string()),
+            ));
+            let (messages, _persisted) = run_reply(
+                provider.clone(),
+                "provider-error-network-exhaust",
+                &[("GOOSE_PROVIDER_ERROR_RETRIES", Some("1"))],
+            )
+            .await?;
+
+            // 1 initial call + 1 retry.
+            assert_eq!(provider.calls(), 2);
+            let text = concat_text(&messages);
+            assert!(
+                text.contains("Network error: connection reset")
+                    && text.contains("Please resend your message to try again"),
+                "the exhausted-retry fallback should surface, got: {text:?}"
+            );
+            assert!(
+                !text.contains("All done."),
+                "provider never succeeds, no recovery text expected: {text:?}"
+            );
+            let progress = progress_messages(&messages);
+            assert!(
+                progress.iter().any(|msg| msg.contains("1/1")),
+                "expected the retry notification to show the configured limit, got: {progress:?}"
+            );
+            Ok(())
+        }
+
+        /// ServerError goes through the generic error arm and is retried as a
+        /// transient error.
+        #[tokio::test]
+        async fn provider_error_server_error_retries_then_recovers() -> Result<()> {
+            let provider = Arc::new(ErrorThenTextProvider::new(
+                2,
+                ProviderError::ServerError("upstream 502".to_string()),
+            ));
+            let (messages, persisted) =
+                run_reply(provider.clone(), "provider-error-server-recover", &[]).await?;
+
+            assert_eq!(provider.calls(), 3);
+            let text = concat_text(&messages);
+            assert!(
+                text.contains("All done."),
+                "expected the recovery text, got: {text:?}"
+            );
+            assert!(
+                !text.contains("Server error"),
+                "a recovered retry must not surface the error: {text:?}"
+            );
+            let progress = progress_messages(&messages);
+            assert!(
+                progress
+                    .iter()
+                    .any(|msg| msg.contains("Server error") && msg.contains("2/3")),
+                "expected the second retry notification, got: {progress:?}"
+            );
+            assert!(
+                !persisted
+                    .iter()
+                    .any(|m| m.as_concat_text().contains("Server error")),
+                "intermediate retried errors must not be persisted: {persisted:?}"
+            );
+            Ok(())
+        }
+
+        /// GOOSE_PROVIDER_ERROR_RETRIES=-1 means unlimited retries; a provider
+        /// that fails three times before succeeding still recovers.
+        #[tokio::test]
+        async fn provider_error_infinite_retries_recover() -> Result<()> {
+            let provider = Arc::new(ErrorThenTextProvider::new(
+                3,
+                ProviderError::NetworkError("connection reset".to_string()),
+            ));
+            let (messages, _persisted) = run_reply(
+                provider.clone(),
+                "provider-error-infinite-recover",
+                &[("GOOSE_PROVIDER_ERROR_RETRIES", Some("-1"))],
+            )
+            .await?;
+
+            assert_eq!(provider.calls(), 4);
+            let text = concat_text(&messages);
+            assert!(
+                text.contains("All done."),
+                "infinite retries must eventually recover, got: {text:?}"
+            );
+            let progress = progress_messages(&messages);
+            assert!(
+                progress.iter().any(|msg| msg.contains("3/infinite")),
+                "infinite mode should label the limit as infinite, got: {progress:?}"
+            );
+            Ok(())
+        }
+
+        /// Authentication errors are terminal: no retry, error surfaces
+        /// immediately, reply ends.
+        #[tokio::test]
+        async fn provider_error_authentication_is_terminal() -> Result<()> {
+            let provider = Arc::new(ErrorThenTextProvider::new(
+                usize::MAX,
+                ProviderError::Authentication("invalid api key".to_string()),
+            ));
+            let (messages, persisted) = run_reply(
+                provider.clone(),
+                "provider-error-auth-terminal",
+                &[("GOOSE_PROVIDER_ERROR_RETRIES", Some("-1"))],
+            )
+            .await?;
+
+            // A terminal error must not be retried even in infinite mode.
+            assert_eq!(
+                provider.calls(),
+                1,
+                "authentication errors must not be retried"
+            );
+            let surfaced = messages
+                .iter()
+                .flat_map(|m| m.content.iter())
+                .find_map(|c| match c {
+                    MessageContent::Error(e) => Some((e.kind.clone(), e.message.clone())),
+                    _ => None,
+                });
+            let (kind, message) =
+                surfaced.expect("the terminal error should surface as an error block");
+            assert_eq!(
+                kind,
+                goose::conversation::message::MessageErrorKind::Authentication
+            );
+            assert!(
+                message.contains("Authentication error: invalid api key"),
+                "unexpected error text: {message:?}"
+            );
+            let text = concat_text(&messages);
+            assert!(
+                !text.contains("All done."),
+                "no recovery expected: {text:?}"
+            );
+            let progress = progress_messages(&messages);
+            assert!(
+                progress.iter().all(|msg| !msg.contains("retrying")),
+                "no retry notification expected, got: {progress:?}"
+            );
+            assert!(
+                persisted.iter().any(|m| {
+                    m.content.iter().any(|c| match c {
+                        MessageContent::Error(e) => {
+                            e.kind == goose::conversation::message::MessageErrorKind::Authentication
+                        }
+                        _ => false,
+                    })
+                }),
+                "the terminal error should be persisted: {persisted:?}"
+            );
+            Ok(())
+        }
+
+        /// An empty response is retried under the same policy: two empty
+        /// responses followed by a real one recover.
+        #[tokio::test]
+        async fn provider_error_empty_response_recovers_under_default_policy() -> Result<()> {
+            let provider = Arc::new(EmptyThenTextProvider::new(2));
+            let (messages, persisted) =
+                run_reply(provider.clone(), "provider-error-empty-recover", &[]).await?;
+
+            assert_eq!(provider.calls(), 3);
+            let text = concat_text(&messages);
+            assert!(
+                text.contains("All done."),
+                "expected the recovery text, got: {text:?}"
+            );
+            assert!(
+                !text.contains("empty response"),
+                "a recovered empty-turn retry must not surface the fallback: {text:?}"
+            );
+            let progress = progress_messages(&messages);
+            assert!(
+                progress
+                    .iter()
+                    .any(|msg| msg.contains("empty response") && msg.contains("2/3")),
+                "expected the second empty-retry notification, got: {progress:?}"
+            );
+            assert!(
+                !persisted
+                    .iter()
+                    .any(|m| { m.role == rmcp::model::Role::Assistant && m.content.is_empty() }),
+                "empty retried turns must not be persisted: {persisted:?}"
+            );
+            Ok(())
+        }
+
+        /// With GOOSE_PROVIDER_ERROR_RETRIES=1, an empty-response retry budget
+        /// of one leaves an empty provider surfacing EMPTY_TURN_MESSAGE.
+        #[tokio::test]
+        async fn provider_error_empty_response_exhaustion_surfaces_message() -> Result<()> {
+            let provider = Arc::new(EmptyThenTextProvider::new(usize::MAX));
+            let (messages, _persisted) = run_reply(
+                provider.clone(),
+                "provider-error-empty-exhaust",
+                &[("GOOSE_PROVIDER_ERROR_RETRIES", Some("1"))],
+            )
+            .await?;
+
+            // 1 initial call + 1 retry.
+            assert_eq!(provider.calls(), 2);
+            let text = concat_text(&messages);
+            assert!(
+                text.contains("The model returned an empty response"),
+                "the empty-turn fallback should surface, got: {text:?}"
+            );
+            assert!(
+                !text.contains("All done."),
+                "provider never produces text: {text:?}"
+            );
+            Ok(())
+        }
+
+        /// Retry attempts do not consume turns: with max_turns=1 a provider
+        /// that fails once then succeeds still completes successfully.
+        #[tokio::test]
+        async fn provider_error_retry_does_not_consume_turns() -> Result<()> {
+            let _guard = env_lock::lock_env([
+                ("GOOSE_STATE_MACHINE", None),
+                ("GOOSE_PROVIDER_RETRY_INTERVAL_SECONDS", Some("0")),
+            ]);
+
+            let agent = Agent::new();
+            let session = agent
+                .config
+                .session_manager
+                .create_session(
+                    PathBuf::default(),
+                    "provider-error-turn-budget".to_string(),
+                    SessionType::Hidden,
+                    GooseMode::default(),
+                )
+                .await?;
+            let provider = Arc::new(ErrorThenTextProvider::new(
+                1,
+                ProviderError::NetworkError("connection reset".to_string()),
+            ));
+            agent
+                .update_provider(
+                    provider.clone(),
+                    ModelConfig::new("mock-model"),
+                    &session.id,
+                )
+                .await?;
+
+            let session_config = SessionConfig {
+                id: session.id,
+                schedule_id: None,
+                max_turns: Some(1),
+                retry_config: None,
+            };
+
+            let reply_stream = agent
+                .reply(
+                    Message::user().with_text("Hi"),
+                    session_config,
+                    goose::agents::state_machine::enabled(),
+                    None,
+                )
+                .await?;
+            tokio::pin!(reply_stream);
+
+            let mut messages = Vec::new();
+            while let Some(event) = reply_stream.next().await {
+                if let AgentEvent::Message(m) = event? {
+                    messages.push(m);
+                }
+            }
+
+            assert_eq!(
+                provider.calls(),
+                2,
+                "the retry must happen within the single-turn budget"
+            );
+            let text = concat_text(&messages);
+            assert!(
+                text.contains("All done."),
+                "the retry must not consume the single turn, got: {text:?}"
+            );
+            assert!(
+                !text.contains("maximum number of actions"),
+                "max-turns must not trigger: {text:?}"
+            );
             Ok(())
         }
     }

@@ -63,6 +63,23 @@ const i18n = defineMessages({
     id: 'settings.agentLoop.operations.recipeRetry.description',
     defaultMessage: 'Runs recipe checks again when a configured success check fails.',
   },
+  providerRetryTitle: {
+    id: 'settings.agentLoop.operations.providerRetry.title',
+    defaultMessage: 'Provider error retries',
+  },
+  providerRetryDescription: {
+    id: 'settings.agentLoop.operations.providerRetry.description',
+    defaultMessage:
+      'Retries a turn after an empty model response or a network, server, or rate-limit error. Set retries to -1 for unlimited. Authentication, context-length, and credits errors always fail immediately.',
+  },
+  providerRetriesLabel: {
+    id: 'settings.agentLoop.operations.providerRetry.retries.label',
+    defaultMessage: 'Retries',
+  },
+  providerRetryIntervalLabel: {
+    id: 'settings.agentLoop.operations.providerRetry.interval.label',
+    defaultMessage: 'Interval (s)',
+  },
   stopHooksTitle: {
     id: 'settings.agentLoop.operations.stopHooks.title',
     defaultMessage: 'Stop hooks',
@@ -107,7 +124,9 @@ type NumberSetting =
   | 'toolCallCutoff'
   | 'retryTimeout'
   | 'failureTimeout'
-  | 'stopHookBlockCap';
+  | 'stopHookBlockCap'
+  | 'providerRetries'
+  | 'providerRetryInterval';
 
 type NumberSettings = Record<NumberSetting, string>;
 
@@ -118,6 +137,8 @@ const defaultNumberSettings: NumberSettings = {
   retryTimeout: '300',
   failureTimeout: '600',
   stopHookBlockCap: '8',
+  providerRetries: '3',
+  providerRetryInterval: '5',
 };
 
 function readNumber(value: unknown, fallback: number) {
@@ -222,6 +243,8 @@ export default function AgentLoopSettings() {
       read('GOOSE_RECIPE_RETRY_TIMEOUT_SECONDS', false),
       read('GOOSE_RECIPE_ON_FAILURE_TIMEOUT_SECONDS', false),
       read('GOOSE_STOP_HOOK_BLOCK_CAP', false),
+      read('GOOSE_PROVIDER_ERROR_RETRIES', false),
+      read('GOOSE_PROVIDER_RETRY_INTERVAL_SECONDS', false),
     ]).then(
       ([
         useLegacyAgentLoop,
@@ -233,6 +256,8 @@ export default function AgentLoopSettings() {
         retryTimeout,
         failureTimeout,
         stopHookBlockCap,
+        providerRetries,
+        providerRetryInterval,
       ]) => {
         if (!active) return;
 
@@ -253,6 +278,8 @@ export default function AgentLoopSettings() {
           retryTimeout: String(readNumber(retryTimeout, 300)),
           failureTimeout: String(readNumber(failureTimeout, 600)),
           stopHookBlockCap: String(readNumber(stopHookBlockCap, 8)),
+          providerRetries: String(readNumber(providerRetries, 3)),
+          providerRetryInterval: String(readNumber(providerRetryInterval, 5)),
         });
       }
     );
@@ -386,6 +413,39 @@ export default function AgentLoopSettings() {
                   disabled={!toolPairCompactionEnabled}
                   onChange={(value) => setNumber('toolCallCutoff', value)}
                   onBlur={saveToolCallCutoff}
+                />
+              </div>
+            </OperationRow>
+
+            <OperationRow
+              title={intl.formatMessage(i18n.providerRetryTitle)}
+              description={intl.formatMessage(i18n.providerRetryDescription)}
+            >
+              <div className="flex flex-col gap-2">
+                <NumberInput
+                  label={intl.formatMessage(i18n.providerRetriesLabel)}
+                  value={numbers.providerRetries}
+                  min={-1}
+                  max={100}
+                  onChange={(value) => setNumber('providerRetries', value)}
+                  onBlur={() =>
+                    saveNumber('providerRetries', 'GOOSE_PROVIDER_ERROR_RETRIES', -1, 100)
+                  }
+                />
+                <NumberInput
+                  label={intl.formatMessage(i18n.providerRetryIntervalLabel)}
+                  value={numbers.providerRetryInterval}
+                  min={0}
+                  max={3600}
+                  onChange={(value) => setNumber('providerRetryInterval', value)}
+                  onBlur={() =>
+                    saveNumber(
+                      'providerRetryInterval',
+                      'GOOSE_PROVIDER_RETRY_INTERVAL_SECONDS',
+                      0,
+                      3600
+                    )
+                  }
                 />
               </div>
             </OperationRow>

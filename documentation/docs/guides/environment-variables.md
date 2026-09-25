@@ -89,7 +89,27 @@ To see Claude's thinking output in the **CLI**, you also need to set `GOOSE_CLI_
 
 ### Provider Retries
 
-Configurable retry parameters for LLM providers. 
+Configurable retry parameters for LLM providers.
+
+#### Turn-Level Retries (All Providers)
+
+When a model call fails at the agent-loop level — with an empty response, a network error, a server error, or a rate-limit-style error — goose waits a fixed interval and retries the turn, after the provider's own HTTP-level retries have been exhausted. Authentication, context-length, and credits errors are terminal and are never retried. Each retry is logged, and the wait can be interrupted by stopping the session.
+
+| Variable | Purpose | Values | Default |
+|----------|---------|---------|---------|
+| `GOOSE_PROVIDER_ERROR_RETRIES` | Maximum retries per turn for empty model responses and network/server/rate-limit errors. Applies to all providers | Non-negative integer, or `-1` / `infinite` for unlimited retries | 3 |
+| `GOOSE_PROVIDER_RETRY_INTERVAL_SECONDS` | Fixed (non-exponential) wait in seconds between turn-level retries | Non-negative integer | 5 |
+
+**Examples**
+
+```bash
+# Retry a failed or empty model response up to 5 times per turn, waiting 10s between attempts
+export GOOSE_PROVIDER_ERROR_RETRIES=5
+export GOOSE_PROVIDER_RETRY_INTERVAL_SECONDS=10
+
+# Keep retrying indefinitely (e.g. long-running automation behind a flaky gateway)
+export GOOSE_PROVIDER_ERROR_RETRIES=infinite
+```
 
 #### AWS Bedrock
 

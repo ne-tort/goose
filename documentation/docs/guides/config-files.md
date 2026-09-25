@@ -51,6 +51,8 @@ The following settings can be configured at the root level of your config.yaml f
 | `GOOSE_CACHE_TTL` | Anthropic prompt-cache TTL; `1h` keeps the cached prefix alive across idle gaps at a higher cache-write rate. Headless runs always use `5m` | "5m", "1h" | "5m" | No |
 | `GOOSE_MODE` | [Tool execution behavior](/docs/guides/managing-tools/goose-permissions) | "auto", "approve", "chat", "smart_approve" | "auto" | No |
 | `GOOSE_MAX_TURNS` | [Maximum number of turns](/docs/guides/sessions/smart-context-management#maximum-turns) allowed without user input | Integer (e.g., 10, 50, 100) | 1000 | No |
+| `GOOSE_PROVIDER_ERROR_RETRIES` | Maximum retries per turn when the model returns an empty response or a network/server/rate-limit error; authentication, context-length, and credits errors are never retried | Non-negative integer, or `-1` / `infinite` for unlimited retries | 3 | No |
+| `GOOSE_PROVIDER_RETRY_INTERVAL_SECONDS` | Fixed (non-exponential) wait in seconds between turn-level provider retries | Non-negative integer | 5 | No |
 | `GOOSE_TOOLSHIM` | Enable tool interpretation | true/false | false | No |
 | `GOOSE_TOOLSHIM_OLLAMA_MODEL` | Model for tool interpretation | Model name (e.g., "llama3.2") | System default | No |
 | `GOOSE_INPUT_LIMIT` | Override input token limit for Ollama (maps to `num_ctx`) | Positive integer | Model default | No |

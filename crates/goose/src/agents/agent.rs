@@ -35,10 +35,10 @@ use crate::agents::state_machine::{
     persist_tool_confirmation_decision, run_goose, BangShellOperation, CompactionOperation,
     DoctorOperation, Emitter, EntryHookOperation, ExitOnErrorOperation, GooseEffect,
     GooseInferenceProvider, GooseInferenceRequestPreparer, InferenceRunner, MaxTurnsOperation,
-    Operation, ProjectOperation, RecipeOperation, RetryOperation, SkillOperation,
-    SlashCommandOperation, StateMachine, StatusOperation, SteerOperation, SteerQueue, Step,
-    StopHookOperation, ToolApprovalOperation, ToolExecutionOperation, ToolPairCompactionOperation,
-    UnknownToolOperation, MAX_TURNS_MESSAGE,
+    Operation, ProjectOperation, ProviderErrorRetryOperation, RecipeOperation, RetryOperation,
+    SkillOperation, SlashCommandOperation, StateMachine, StatusOperation, SteerOperation,
+    SteerQueue, Step, StopHookOperation, ToolApprovalOperation, ToolExecutionOperation,
+    ToolPairCompactionOperation, UnknownToolOperation, MAX_TURNS_MESSAGE,
 };
 use crate::agents::types::{
     SessionConfig, SharedProvider, DEFAULT_ON_FAILURE_TIMEOUT_SECONDS,
@@ -52,8 +52,8 @@ use crate::context_mgmt::{
     check_if_compaction_needed, compact_messages, DEFAULT_COMPACTION_THRESHOLD,
 };
 use crate::conversation::message::{
-    ActionRequiredData, InferenceMetadata, Message, MessageContent, MessageUsage, ProviderMetadata,
-    SystemNotificationType,
+    ActionRequiredData, InferenceMetadata, Message, MessageContent, MessageErrorKind, MessageUsage,
+    ProviderMetadata, SystemNotificationType,
 };
 use crate::conversation::{debug_conversation_fix, fix_conversation, Conversation};
 use crate::permission::permission_inspector::PermissionInspector;
@@ -85,13 +85,43 @@ use tracing::{debug, error, info, instrument, warn};
 const DEFAULT_MAX_TURNS: u32 = 1000;
 const DEFAULT_STOP_HOOK_BLOCK_CAP: u32 = 8;
 const COMPACTION_PROGRESS_TEXT: &str = "goose is compacting the conversation...";
-const MAX_EMPTY_TURN_RETRIES: u32 = 3;
 const EMPTY_TURN_MESSAGE: &str =
     "The model returned an empty response. Please resend your message to continue.";
 
 fn provider_creation_error(error: anyhow::Error, context: impl fmt::Display) -> anyhow::Error {
     let message = format!("{context}: {error}");
     error.context(message)
+}
+
+fn should_retry_provider_error(
+    attempts: u32,
+    policy: &super::provider_retry::ProviderRetryPolicy,
+) -> bool {
+    match policy.max_retries {
+        super::provider_retry::RetryLimit::Infinite => true,
+        super::provider_retry::RetryLimit::Finite(limit) => attempts < limit,
+    }
+}
+
+fn provider_error_retry_limit_label(policy: &super::provider_retry::ProviderRetryPolicy) -> String {
+    match policy.max_retries {
+        super::provider_retry::RetryLimit::Finite(limit) => limit.to_string(),
+        super::provider_retry::RetryLimit::Infinite => "infinite".to_string(),
+    }
+}
+
+fn provider_error_retry_notification(
+    provider_err: &ProviderError,
+    attempt: u32,
+    policy: &super::provider_retry::ProviderRetryPolicy,
+) -> String {
+    format!(
+        "Provider error ({}), retrying in {:?} (attempt {}/{})...",
+        provider_err,
+        policy.interval,
+        attempt,
+        provider_error_retry_limit_label(policy),
+    )
 }
 
 fn normalize_legacy_provider_thinking_effort(
@@ -1719,6 +1749,9 @@ impl Agent {
                 self.hook_manager.clone(),
             )),
             Arc::new(UnknownToolOperation::new(self.hook_manager.clone())),
+            Arc::new(ProviderErrorRetryOperation::new(
+                super::provider_retry::load_policy(),
+            )),
             Arc::new(RetryOperation::new(
                 &self.goal,
                 &self.grind,
@@ -2548,6 +2581,9 @@ impl Agent {
             let mut compaction_attempts = 0;
             let mut empty_turn_retries = 0u32;
             let mut retrying_after_empty_turn = false;
+            let provider_retry_policy = super::provider_retry::load_policy();
+            let mut provider_error_retries = 0u32;
+            let mut retrying_after_provider_error = false;
             let mut last_assistant_text = String::new();
             let mut turn_total_usage = Usage::default();
             let mut goal_check_pending = false;
@@ -2665,6 +2701,8 @@ impl Agent {
 
                 if retrying_after_stop_hook_denial {
                     retrying_after_stop_hook_denial = false;
+                } else if retrying_after_provider_error {
+                    retrying_after_provider_error = false;
                 } else if retrying_after_empty_turn {
                     retrying_after_empty_turn = false;
                 } else {
@@ -3242,11 +3280,46 @@ impl Agent {
                             #[cfg(feature = "telemetry")]
                             crate::posthog::emit_error(provider_err.telemetry_type(), &provider_err.to_string());
                             error!("Error: {}", provider_err);
-                            yield AgentEvent::Message(
-                                Message::assistant().with_text(
-                                    format!("{provider_err}\n\nPlease resend your message to try again.")
-                                )
-                            );
+                            if should_retry_provider_error(
+                                provider_error_retries,
+                                &provider_retry_policy,
+                            ) {
+                                provider_error_retries += 1;
+                                retrying_after_provider_error = true;
+                                messages_to_add = Conversation::default();
+                                last_assistant_text.clear();
+                                warn!(
+                                    "retrying provider error (attempt {}/{}), waiting {:?}",
+                                    provider_error_retries,
+                                    provider_error_retry_limit_label(&provider_retry_policy),
+                                    provider_retry_policy.interval
+                                );
+                                yield AgentEvent::Message(
+                                    Message::assistant().with_system_notification(
+                                        SystemNotificationType::ProgressMessage,
+                                        provider_error_retry_notification(
+                                            provider_err,
+                                            provider_error_retries,
+                                            &provider_retry_policy,
+                                        ),
+                                    ),
+                                );
+                                if let Some(cancel_token) = &cancel_token {
+                                    tokio::select! {
+                                        biased;
+                                        _ = cancel_token.cancelled() => break,
+                                        _ = tokio::time::sleep(provider_retry_policy.interval) => {}
+                                    }
+                                } else {
+                                    tokio::time::sleep(provider_retry_policy.interval).await;
+                                }
+                            } else {
+                                yield AgentEvent::Message(
+                                    Message::assistant().with_text(
+                                        format!("{provider_err}\n\nPlease resend your message to try again.")
+                                    )
+                                );
+                            }
                             break;
                         }
                         Err(ref provider_err) => {
@@ -3254,11 +3327,51 @@ impl Agent {
                             #[cfg(feature = "telemetry")]
                             crate::posthog::emit_error(provider_err.telemetry_type(), &provider_err.to_string());
                             error!("Error: {}", provider_err);
-                            yield AgentEvent::Message(
-                                Message::assistant().with_text(
-                                    format!("Ran into this error: {provider_err}.\n\nPlease retry if you think this is a transient or recoverable error.")
+                            let retryable = super::provider_retry::classify_error(
+                                MessageErrorKind::from(provider_err),
+                            ) == super::provider_retry::RetryDecision::Retry;
+                            if retryable
+                                && should_retry_provider_error(
+                                    provider_error_retries,
+                                    &provider_retry_policy,
                                 )
-                            );
+                            {
+                                provider_error_retries += 1;
+                                retrying_after_provider_error = true;
+                                messages_to_add = Conversation::default();
+                                last_assistant_text.clear();
+                                warn!(
+                                    "retrying provider error (attempt {}/{}), waiting {:?}",
+                                    provider_error_retries,
+                                    provider_error_retry_limit_label(&provider_retry_policy),
+                                    provider_retry_policy.interval
+                                );
+                                yield AgentEvent::Message(
+                                    Message::assistant().with_system_notification(
+                                        SystemNotificationType::ProgressMessage,
+                                        provider_error_retry_notification(
+                                            provider_err,
+                                            provider_error_retries,
+                                            &provider_retry_policy,
+                                        ),
+                                    ),
+                                );
+                                if let Some(cancel_token) = &cancel_token {
+                                    tokio::select! {
+                                        biased;
+                                        _ = cancel_token.cancelled() => break,
+                                        _ = tokio::time::sleep(provider_retry_policy.interval) => {}
+                                    }
+                                } else {
+                                    tokio::time::sleep(provider_retry_policy.interval).await;
+                                }
+                            } else {
+                                yield AgentEvent::Message(
+                                    Message::assistant().with_text(
+                                        format!("Ran into this error: {provider_err}.\n\nPlease retry if you think this is a transient or recoverable error.")
+                                    )
+                                );
+                            }
                             break;
                         }
                     }
@@ -3298,8 +3411,9 @@ impl Agent {
 
                 if empty_response {
                     messages_to_add = Conversation::default();
-                } else {
+                } else if !retrying_after_provider_error {
                     empty_turn_retries = 0;
+                    provider_error_retries = 0;
                 }
 
                 if no_tools_called && !exit_chat {
@@ -3311,6 +3425,7 @@ impl Agent {
                     };
 
                     match final_output {
+                        None if retrying_after_provider_error => {}
                         Some(None) => {
                             warn!("Final output tool has not been called yet. Continuing agent loop.");
                             let message = push_message_with_id(
@@ -3385,13 +3500,36 @@ impl Agent {
                                     // silent exit. Retry a bounded number of
                                     // times, then surface a visible message so
                                     // the user is never left with no response.
-                                    if empty_turn_retries < MAX_EMPTY_TURN_RETRIES {
+                                    if should_retry_provider_error(
+                                        empty_turn_retries,
+                                        &provider_retry_policy,
+                                    ) {
                                         empty_turn_retries += 1;
                                         retrying_after_empty_turn = true;
                                         warn!(
-                                            "Provider returned an empty response; retrying ({}/{})",
-                                            empty_turn_retries, MAX_EMPTY_TURN_RETRIES
+                                            "Provider returned an empty response; retrying (attempt {}/{})",
+                                            empty_turn_retries, provider_error_retry_limit_label(&provider_retry_policy)
                                         );
+                                        yield AgentEvent::Message(
+                                            Message::assistant().with_system_notification(
+                                                SystemNotificationType::ProgressMessage,
+                                                format!(
+                                                    "Provider returned an empty response, retrying in {:?} (attempt {}/{})...",
+                                                    provider_retry_policy.interval,
+                                                    empty_turn_retries,
+                                                    provider_error_retry_limit_label(&provider_retry_policy),
+                                                ),
+                                            ),
+                                        );
+                                        if let Some(cancel_token) = &cancel_token {
+                                            tokio::select! {
+                                                biased;
+                                                _ = cancel_token.cancelled() => break,
+                                                _ = tokio::time::sleep(provider_retry_policy.interval) => {}
+                                            }
+                                        } else {
+                                            tokio::time::sleep(provider_retry_policy.interval).await;
+                                        }
                                     } else {
                                         warn!("Provider returned an empty response after retries; ending turn");
                                         last_assistant_text = EMPTY_TURN_MESSAGE.to_string();

@@ -19,6 +19,7 @@ activities:
   - Validate ACP thinking-effort discovery, forwarding, and provider switching
   - Validate GDK observability hook lifecycle events and payload opt-in
   - Test error boundaries including nested delegation prevention
+  - Validate configurable turn-level provider error retry (GOOSE_PROVIDER_ERROR_RETRIES, GOOSE_PROVIDER_RETRY_INTERVAL_SECONDS)
   - Generate comprehensive test report
 
 parameters:
@@ -51,6 +52,18 @@ parameters:
     requirement: optional
     default: "true"
     description: "Clean up test artifacts after completion"
+
+  - key: provider_error_retries
+    input_type: string
+    requirement: optional
+    default: ""
+    description: "GOOSE_PROVIDER_ERROR_RETRIES value for this run (-1 or infinite = unlimited); empty uses the built-in default (3)"
+
+  - key: provider_retry_interval_seconds
+    input_type: string
+    requirement: optional
+    default: ""
+    description: "GOOSE_PROVIDER_RETRY_INTERVAL_SECONDS value for this run (fixed wait between retries); empty uses the built-in default (5)"
 
 instructions: |
   You are testing yourself - a running goose instance validating its own capabilities through meta-testing.
@@ -132,6 +145,7 @@ extensions:
 prompt: |
   Execute the Goose Self-Testing Integration Suite in {{ workspace_dir }}.
   Test phases: {{ test_phases }}, Depth: {{ test_depth }}, Parallel: {{ parallel_tests }}
+  Provider error retry: GOOSE_PROVIDER_ERROR_RETRIES={{ provider_error_retries }}, GOOSE_PROVIDER_RETRY_INTERVAL_SECONDS={{ provider_retry_interval_seconds }} (empty = built-in defaults: 3 retries, 5s interval)
 
   ## 🚀 INITIALIZATION
   Create test workspace using `mkdir -p {{ workspace_dir }}/archive` for all test artifacts and reports.
