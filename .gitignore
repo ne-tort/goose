@@ -99,3 +99,7 @@ gooseselftest/
 /crates/goose-sdk/examples/uniffi/kotlin/build/
 
 live-in-desktop-design
+
+# Local portable build artifacts
+goose-portable/
+goose-portable-win64.zip
