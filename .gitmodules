@@ -1,0 +1,3 @@
+[submodule "GooseClaw"]
+	path = GooseClaw
+	url = https://github.com/ne-tort/GooseClaw.git
