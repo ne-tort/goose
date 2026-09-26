@@ -1,0 +1,35 @@
+{
+  "name": "alibaba-cn",
+  "engine": "openai",
+  "display_name": "Alibaba (China)",
+  "description": "Alibaba Cloud Model Studio (DashScope China) via its OpenAI-compatible API. Model context limits resolve from the alibaba-cn catalog, including third-party models hosted there (Kimi, DeepSeek, GLM, MiniMax).",
+  "api_key_env": "DASHSCOPE_API_KEY",
+  "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+  "catalog_provider_id": "alibaba-cn",
+  "dynamic_models": true,
+  "models": [
+    {
+      "name": "kimi-k3",
+      "context_limit": 1048576
+    },
+    {
+      "name": "qwen-plus",
+      "context_limit": 1000000
+    },
+    {
+      "name": "glm-5.3",
+      "context_limit": 1000000
+    },
+    {
+      "name": "qwen-max",
+      "context_limit": 131072
+    }
+  ],
+  "preserves_thinking": true,
+  "supports_streaming": true,
+  "model_doc_link": "https://help.aliyun.com/zh/model-studio/models",
+  "setup_steps": [
+    "Sign in to https://bailian.console.aliyun.com/ and create an API key",
+    "Set the DASHSCOPE_API_KEY environment variable to the key"
+  ]
+}

@@ -167,6 +167,17 @@ warning-нотификацию.
 резолвить канон автоматически; идеально — общий fallback «по имени модели по
 всему каталогу» для неизвестных провайдеров.
 
+**Готовые шаблоны (2026-09-27).** Bundled-шаблон `alibaba.json` существует, но
+только для международного эндпоинта (`dashscope-intl.aliyuncs.com`). Для
+китайского `dashscope.aliyuncs.com` добавлен `alibaba_cn.json`
+(`catalog_provider_id: "alibaba-cn"`, `dynamic_models: true`): поскольку имя
+провайдера совпадает с id каталога, канонические лимиты (kimi-k3 → 1M)
+резолвятся автоматически и в UI, и в рантайме. Отметим: UI создаёт кастомных
+провайдеров только с префиксом `custom_` (`generate_id`,
+`declarative_providers.rs:84`), поэтому через UI канон для кастомного
+провайдера недостижим — файл в `custom_providers/` создаётся вручную. Бонус:
+в `infer_provider_from_model` отсутствуют префиксы kimi/moonshot — см. выше.
+
 Попутное замечание: в custom_qwe.json у kimi-k3 стоит `reasoning: false`,
 каталог говорит `reasoning: true`. Если DashScope-эндпоинт потребует
 reasoning-контракт (ошибки вида «reasoning_content must be passed back», как на
