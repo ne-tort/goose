@@ -52,8 +52,8 @@ use crate::context_mgmt::{
     check_if_compaction_needed, compact_messages, DEFAULT_COMPACTION_THRESHOLD,
 };
 use crate::conversation::message::{
-    ActionRequiredData, InferenceMetadata, Message, MessageContent, MessageErrorKind, MessageUsage,
-    ProviderMetadata, SystemNotificationType,
+    ActionRequiredData, InferenceMetadata, Message, MessageContent, MessageUsage, ProviderMetadata,
+    SystemNotificationType,
 };
 use crate::conversation::{debug_conversation_fix, fix_conversation, Conversation};
 use crate::permission::permission_inspector::PermissionInspector;
@@ -1725,6 +1725,7 @@ impl Agent {
                 compaction_threshold,
             )));
         }
+        let provider_retry_policy = super::provider_retry::load_policy();
         let remaining_operations: Vec<Arc<dyn Operation<Session, GooseEffect> + '_>> = vec![
             Arc::new(ToolPairCompactionOperation::new(
                 provider.clone(),
@@ -1749,9 +1750,7 @@ impl Agent {
                 self.hook_manager.clone(),
             )),
             Arc::new(UnknownToolOperation::new(self.hook_manager.clone())),
-            Arc::new(ProviderErrorRetryOperation::new(
-                super::provider_retry::load_policy(),
-            )),
+            Arc::new(ProviderErrorRetryOperation::new(provider_retry_policy)),
             Arc::new(RetryOperation::new(
                 &self.goal,
                 &self.grind,
@@ -1778,7 +1777,10 @@ impl Agent {
         let inference_provider = Arc::new(GooseInferenceProvider::new(provider));
         let inference = Arc::new(
             InferenceRunner::new(inference_provider, model_config)
-                .with_request_preparer(Arc::new(request_preparer)),
+                .with_request_preparer(Arc::new(request_preparer))
+                .with_empty_response_retry(super::provider_retry::empty_response_retry(
+                    &provider_retry_policy,
+                )),
         );
         let mut command_handlers = operations.clone();
         command_handlers.push(status_operation);
@@ -3327,8 +3329,8 @@ impl Agent {
                             #[cfg(feature = "telemetry")]
                             crate::posthog::emit_error(provider_err.telemetry_type(), &provider_err.to_string());
                             error!("Error: {}", provider_err);
-                            let retryable = super::provider_retry::classify_error(
-                                MessageErrorKind::from(provider_err),
+                            let retryable = super::provider_retry::classify_provider_error(
+                                provider_err,
                             ) == super::provider_retry::RetryDecision::Retry;
                             if retryable
                                 && should_retry_provider_error(

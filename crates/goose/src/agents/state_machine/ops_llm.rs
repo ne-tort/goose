@@ -9,6 +9,7 @@ pub use goose_agent::inference::InferenceRunner;
 use goose_providers::base::{MessageStream, ModelInfo, Provider};
 use goose_providers::conversation::message::Message;
 use goose_providers::conversation::token_usage::ProviderUsage;
+use goose_providers::conversation::Conversation;
 use goose_providers::errors::ProviderError;
 use goose_providers::model::ModelConfig;
 
@@ -33,6 +34,10 @@ impl GooseInferenceProvider {
 impl InferenceEffect for GooseEffect {
     fn record_usage(usage: ProviderUsage) -> Self {
         GooseEffect::RecordUsage(usage)
+    }
+
+    fn replace_conversation(conversation: Conversation) -> Self {
+        GooseEffect::from(conversation)
     }
 }
 

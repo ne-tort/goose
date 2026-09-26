@@ -503,11 +503,13 @@ async fn empty_response_retry_recovers() -> Result<()> {
         .no_choices()
         .reply_after_failures(1, "recovered from the blank response");
 
+    // The inference-level retry unwinds the empty attempt without ending the
+    // run, so a single run recovers on its own — no client resume needed.
     let result = pipeline.run(["empty then good"]).await?;
-    result.assert_message(-1, Agent, "model returned an empty response");
-
-    let result = pipeline.resume().await?;
     result.assert_message(-1, Agent, "recovered from the blank response");
+    assert!(progress_notifications(&result)
+        .iter()
+        .any(|msg| msg.contains("1/2")));
     let messages = result.conversation().messages();
     assert!(
         messages.iter().all(|message| !message
@@ -528,19 +530,15 @@ async fn empty_response_retry_exhaustion_surfaces_message() -> Result<()> {
     let (pipeline, api) = test_pipeline().await?;
     api.on("always empty").no_choices();
 
+    // Retries happen inside the run; exhaustion surfaces the fallback message
+    // and ends the turn without any client resume.
     let result = pipeline.run(["always empty"]).await?;
-    result.assert_message(-1, Agent, "model returned an empty response");
-
-    let result = pipeline.resume().await?;
     assert!(progress_notifications(&result)
         .iter()
         .any(|msg| msg.contains("1/2")));
-    let result = pipeline.resume().await?;
     assert!(progress_notifications(&result)
         .iter()
         .any(|msg| msg.contains("2/2")));
-
-    let result = pipeline.resume().await?;
     result.assert_message(-1, Agent, "model returned an empty response");
     assert_eq!(
         calls_matching(&api, "always empty"),

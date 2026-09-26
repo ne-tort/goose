@@ -24,6 +24,11 @@ const GOOSE_PROVIDER_RETRY_INTERVAL_SECONDS: &str = "GOOSE_PROVIDER_RETRY_INTERV
 /// kickoff, so the kickoff message is the only place a counter survives.
 pub const PROVIDER_RETRY_ATTEMPTS_META: &str = "provider_retry_attempts";
 
+/// The operation namespace the attempts counter lives under: the state-machine
+/// retry operation writes it there, and the inference-level empty-response
+/// retry reads and increments the same note.
+pub const PROVIDER_RETRY_ATTEMPTS_OPERATION: &str = "provider_error_retry";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RetryLimit {
     Finite(u32),
@@ -95,6 +100,44 @@ pub fn classify_error(kind: MessageErrorKind) -> RetryDecision {
         MessageErrorKind::Authentication
         | MessageErrorKind::ContextLengthExceeded
         | MessageErrorKind::CreditsExhausted => RetryDecision::Terminal,
+    }
+}
+
+/// Classifies a live `ProviderError`, refining `classify_error` with the
+/// permanent-failure markers: deterministic 4xx payloads (Anthropic thinking
+/// immutability, DeepSeek-style `reasoning_content` contracts) are rebuilt
+/// identically on every retry, so retrying can never succeed.
+pub fn classify_provider_error(error: &goose_providers::errors::ProviderError) -> RetryDecision {
+    if let goose_providers::errors::ProviderError::RequestFailed(message) = error {
+        if goose_providers::retry::is_permanent_request_error(message) {
+            return RetryDecision::Terminal;
+        }
+    }
+    classify_error(MessageErrorKind::from(error))
+}
+
+/// Whether an error message's text marks it as deterministically permanent —
+/// for paths that only have the persisted message text, not the error value.
+pub fn text_marks_permanent(message: &str) -> bool {
+    goose_providers::retry::is_permanent_request_error(message)
+}
+
+/// The empty-response retry parameters for the state-machine inference
+/// operation, sharing the kickoff-note counter with
+/// `ProviderErrorRetryOperation` so both mechanisms count the same attempts.
+pub fn empty_response_retry(
+    policy: &ProviderRetryPolicy,
+) -> goose_agent::inference::EmptyResponseRetry {
+    goose_agent::inference::EmptyResponseRetry {
+        max_retries: match policy.max_retries {
+            RetryLimit::Finite(limit) => Some(limit),
+            RetryLimit::Infinite => None,
+        },
+        interval: policy.interval,
+        attempts_note: (
+            PROVIDER_RETRY_ATTEMPTS_OPERATION,
+            PROVIDER_RETRY_ATTEMPTS_META,
+        ),
     }
 }
 
@@ -175,10 +218,19 @@ mod tests {
     }
 
     #[test]
-    fn load_policy_defaults_when_nothing_is_set() {
+    fn load_policy_env_overrides_config_file() {
+        // The user's config.yaml may legitimately set these keys, so pin the
+        // values through env (which get_param prefers) instead of asserting
+        // fallback defaults against a mutable config file.
         let _guard = env_lock::lock_env([
-            (GOOSE_PROVIDER_ERROR_RETRIES, None::<&str>),
-            (GOOSE_PROVIDER_RETRY_INTERVAL_SECONDS, None::<&str>),
+            (
+                GOOSE_PROVIDER_ERROR_RETRIES,
+                Some(DEFAULT_MAX_RETRIES.to_string()).as_deref(),
+            ),
+            (
+                GOOSE_PROVIDER_RETRY_INTERVAL_SECONDS,
+                Some(DEFAULT_RETRY_INTERVAL_SECONDS.to_string()).as_deref(),
+            ),
         ]);
 
         let policy = load_policy();

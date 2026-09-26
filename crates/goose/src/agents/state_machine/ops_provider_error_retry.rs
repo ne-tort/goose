@@ -9,7 +9,8 @@ use anyhow::Result;
 use async_trait::async_trait;
 
 use crate::agents::provider_retry::{
-    classify_error, ProviderRetryPolicy, RetryDecision, RetryLimit, PROVIDER_RETRY_ATTEMPTS_META,
+    classify_error, text_marks_permanent, ProviderRetryPolicy, RetryDecision, RetryLimit,
+    PROVIDER_RETRY_ATTEMPTS_META,
 };
 use crate::agents::state_machine::effects::GooseEffect;
 use crate::agents::state_machine::{
@@ -94,7 +95,14 @@ impl Operation<Session, GooseEffect> for ProviderErrorRetryOperation {
 
         if let Some(kind) = kind {
             let is_refusal = conversation.last().is_some_and(Self::message_is_refusal);
-            if classify_error(kind) == RetryDecision::Terminal || is_refusal {
+            let is_permanent = conversation.last().is_some_and(|message| {
+                message
+                    .content
+                    .iter()
+                    .filter_map(|content| content.as_error())
+                    .any(|error| text_marks_permanent(&error.message))
+            });
+            if classify_error(kind) == RetryDecision::Terminal || is_refusal || is_permanent {
                 return not_applicable();
             }
         }

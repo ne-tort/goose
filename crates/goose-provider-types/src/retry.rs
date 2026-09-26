@@ -83,12 +83,15 @@ impl RetryConfig {
 
 /// Substrings marking a `RequestFailed` (4xx) as deterministically permanent:
 /// Anthropic rejects signed `thinking`/`redacted_thinking` blocks as immutable
-/// once a thinking model's config changes mid-conversation, and the identical
-/// payload is rebuilt on every retry — so retrying can never succeed.
+/// once a thinking model's config changes mid-conversation, and DeepSeek-style
+/// endpoints reject a conversation whose assistant turns dropped their
+/// `reasoning_content`. The identical payload is rebuilt on every retry — so
+/// retrying can never succeed.
 const PERMANENT_REQUEST_FAILURE_MARKERS: &[&str] = &[
     "blocks in the latest assistant message cannot be modified",
     "must remain as they were in the original response",
     "Reasoning is mandatory for this endpoint",
+    "must be passed back to the API",
 ];
 
 fn is_permanent_request_failure(message: &str) -> bool {
@@ -96,6 +99,12 @@ fn is_permanent_request_failure(message: &str) -> bool {
         .iter()
         .any(|marker| message.contains(marker))
         || crate::formats::anthropic::is_thinking_signature_error(message)
+}
+
+/// Whether a `RequestFailed` message describes a deterministic failure that
+/// retrying (at any layer) can never fix.
+pub fn is_permanent_request_error(message: &str) -> bool {
+    is_permanent_request_failure(message)
 }
 
 pub fn should_retry(error: &ProviderError, config: &RetryConfig) -> bool {

@@ -6,7 +6,9 @@ use anyhow::Result;
 use async_trait::async_trait;
 use futures::StreamExt;
 use goose_provider_types::base::Provider;
-use goose_provider_types::conversation::message::{InferenceMetadata, Message, MessageContent};
+use goose_provider_types::conversation::message::{
+    InferenceMetadata, Message, MessageContent, SystemNotificationType,
+};
 use goose_provider_types::conversation::token_usage::ProviderUsage;
 use goose_provider_types::conversation::{
     effective_role, fix_conversation, merge_consecutive_messages_for_request, Conversation,
@@ -14,6 +16,7 @@ use goose_provider_types::conversation::{
 };
 use goose_provider_types::errors::ProviderError;
 use goose_provider_types::model::ModelConfig;
+use std::time::Duration;
 use tracing_futures::Instrument;
 
 use crate::operation::{
@@ -62,6 +65,25 @@ impl<S: Sync> InferenceRequestPreparer<S> for IdentityInferenceRequestPreparer {
 
 pub trait InferenceEffect: From<Message> + Send + 'static {
     fn record_usage(usage: ProviderUsage) -> Self;
+
+    /// Effect that restarts the turn from the kickoff message, dropping
+    /// everything after it. Required so the empty-response retry can unwind
+    /// the failed attempt without yielding to the client.
+    fn replace_conversation(conversation: Conversation) -> Self;
+}
+
+/// Turn-level retry policy for empty model responses, applied by
+/// `InferenceRunner` before the empty-response fallback message is emitted.
+/// `max_retries: None` means unlimited. Attempts are counted in the kickoff
+/// message's operation notes under `attempts_note`, sharing the same note the
+/// conversation-level retry operation uses.
+#[derive(Debug, Clone, Copy)]
+pub struct EmptyResponseRetry {
+    pub max_retries: Option<u32>,
+    pub interval: Duration,
+    /// `(operation, key)` coordinates of the attempts counter in the kickoff
+    /// message's operation notes.
+    pub attempts_note: (&'static str, &'static str),
 }
 
 const EMPTY_RESPONSE_MESSAGE: &str =
@@ -167,6 +189,7 @@ pub struct InferenceRunner<'a, S, E> {
     provider: Arc<dyn Provider>,
     model_config: ModelConfig,
     request_preparer: Arc<dyn InferenceRequestPreparer<S> + 'a>,
+    empty_response_retry: Option<EmptyResponseRetry>,
     effect: std::marker::PhantomData<fn() -> E>,
 }
 
@@ -273,6 +296,7 @@ impl<'a, S: Sync, E: InferenceEffect> InferenceRunner<'a, S, E> {
             provider,
             model_config,
             request_preparer: Arc::new(IdentityInferenceRequestPreparer),
+            empty_response_retry: None,
             effect: std::marker::PhantomData,
         }
     }
@@ -285,12 +309,45 @@ impl<'a, S: Sync, E: InferenceEffect> InferenceRunner<'a, S, E> {
         self
     }
 
+    pub fn with_empty_response_retry(mut self, retry: EmptyResponseRetry) -> Self {
+        self.empty_response_retry = Some(retry);
+        self
+    }
+
     async fn error_outcome(&self, err: &ProviderError, emit: &Emitter) -> Vec<E> {
         tracing::Span::current().record("error.type", err.telemetry_type());
         tracing::error!("LLM provider error: {err}");
         let message = Message::from_provider_error(err);
         let message = emit.message(message).await;
         vec![E::from(message)]
+    }
+
+    fn retry_attempts(&self, turn: &[Message], retry: &EmptyResponseRetry) -> u32 {
+        let (operation, key) = retry.attempts_note;
+        turn.first()
+            .and_then(|message| message.metadata.operation_note(operation, key))
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0) as u32
+    }
+
+    fn reset_to_kickoff(
+        &self,
+        conversation: &Conversation,
+        turn: &[Message],
+        retry: &EmptyResponseRetry,
+        next_attempt: u32,
+    ) -> Conversation {
+        let kickoff = conversation.len() - turn.len();
+        let mut reset = Conversation::new_unvalidated(conversation.messages()[..=kickoff].to_vec());
+        if let Some(kickoff_message) = reset.messages_mut().last_mut() {
+            let (operation, key) = retry.attempts_note;
+            kickoff_message.metadata.set_operation_note(
+                operation,
+                key,
+                serde_json::json!(next_attempt),
+            );
+        }
+        reset
     }
 }
 
@@ -484,6 +541,42 @@ impl<S: Sync, E: InferenceEffect> Inference<S, E> for InferenceRunner<'_, S, E> 
                     .any(|message| message.metadata.output_token_limit_reached)
                 && accumulator.iter().all(is_empty_response);
             if empty_response {
+                if let Some(retry) = &self.empty_response_retry {
+                    let attempts = self.retry_attempts(messages, retry);
+                    let exhausted = matches!(retry.max_retries, Some(limit) if attempts >= limit);
+                    if !exhausted {
+                        let mut cancelled_during_wait = false;
+                        tokio::select! {
+                            biased;
+                            _ = emit.cancelled() => cancelled_during_wait = true,
+                            _ = tokio::time::sleep(retry.interval) => {}
+                        }
+                        if !cancelled_during_wait {
+                            let next_attempt = attempts + 1;
+                            let limit_label = retry
+                                .max_retries
+                                .map(|limit| limit.to_string())
+                                .unwrap_or_else(|| "infinite".to_string());
+                            tracing::warn!(
+                                "Provider returned an empty response; retrying (attempt {next_attempt}/{limit_label})"
+                            );
+                            emit.message(Message::assistant().with_system_notification(
+                                SystemNotificationType::ProgressMessage,
+                                format!(
+                                    "Provider returned an empty response, retrying in {:?} (attempt {next_attempt}/{limit_label})...",
+                                    retry.interval
+                                ),
+                            ))
+                            .await;
+                            let reset =
+                                self.reset_to_kickoff(conversation, messages, retry, next_attempt);
+                            usage_effects.push(E::replace_conversation(reset));
+                            return applied(usage_effects);
+                        }
+                        // Cancelled while waiting: surface the empty response
+                        // as before; the machine is being torn down anyway.
+                    }
+                }
                 let message = Message::assistant().with_text(EMPTY_RESPONSE_MESSAGE);
                 let message = emit.message(message).await;
                 usage_effects.push(E::from(message));

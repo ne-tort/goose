@@ -4330,6 +4330,10 @@ mod tests {
         ) -> Result<(Vec<Message>, Vec<Message>)> {
             let mut vars: Vec<(&str, Option<&str>)> = vec![
                 ("GOOSE_STATE_MACHINE", None),
+                // Pin the documented defaults: without this, get_param falls
+                // through to the developer's real config.yaml, whose values
+                // (e.g. GOOSE_PROVIDER_ERROR_RETRIES=-1) would hang tests.
+                ("GOOSE_PROVIDER_ERROR_RETRIES", Some("3")),
                 ("GOOSE_PROVIDER_RETRY_INTERVAL_SECONDS", Some("0")),
                 ("GOOSE_DISABLE_SESSION_NAMING", Some("true")),
             ];

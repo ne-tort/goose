@@ -188,7 +188,10 @@ impl TestPipeline {
         let inference_provider = Arc::new(GooseInferenceProvider::new(provider));
         let inference = Arc::new(
             InferenceRunner::new(inference_provider, self.model_config.clone())
-                .with_request_preparer(Arc::new(request_preparer)),
+                .with_request_preparer(Arc::new(request_preparer))
+                .with_empty_response_retry(crate::agents::provider_retry::empty_response_retry(
+                    &self.provider_retry_policy,
+                )),
         );
         let mut command_handlers = operations.clone();
         command_handlers.push(status_operation);
