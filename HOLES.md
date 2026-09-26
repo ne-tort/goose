@@ -144,6 +144,34 @@ warning-нотификацию.
 **Статус:** причина установлена; пользовательские настройки — на усмотрение
 владельца; кодовый фикс запланирован.
 
+### Кейс kimi-k3 через DashScope (провайдер custom_qwe, 2026-09-27)
+
+Каталог goose **знает** kimi-k3: `moonshotai/kimi-k3` и `alibaba/kimi-k3` —
+контекст 1 048 576. Но резолв проваливается дважды:
+1. `map_to_canonical_model` матчит по имени провайдера — `custom_qwe` в
+   каталоге (models.dev) отсутствует → мимо;
+2. fallback-инференс по имени модели (`infer_provider_from_model`,
+   `name_builder.rs:171`) знает claude/gpt/gemini/llama/mistral/deepseek/qwen,
+   но **не знает префиксы kimi/moonshot** → мимо;
+3. discovery не спасает: DashScope compatible-mode `/models` отдаёт только
+   `id/object/created/owned_by`, без метаданных контекста (проверено) →
+   fallback `DEFAULT_CONTEXT_LIMIT = 128_000` при реальном окне ~1M.
+
+**Быстрый фикс (без кода):** в `custom_providers/custom_qwe.json` проставить
+`"context_limit": 1048576` модели kimi-k3. Ещё быстрый, но грязный: переименовать
+провайдера в `alibaba` (канон заматчится, но сломаются ссылки на имя провайдера
+в конфиге — не рекомендуется).
+
+**Кодовый фикс:** добавить `"kimi" | "moonshot"` в `infer_provider_from_model`
+(→ `moonshotai`) — тогда любые кастомные провайдеры с kimi-моделями начнут
+резолвить канон автоматически; идеально — общий fallback «по имени модели по
+всему каталогу» для неизвестных провайдеров.
+
+Попутное замечание: в custom_qwe.json у kimi-k3 стоит `reasoning: false`,
+каталог говорит `reasoning: true`. Если DashScope-эндпоинт потребует
+reasoning-контракт (ошибки вида «reasoning_content must be passed back», как на
+cheapai) — поставить `reasoning: true`.
+
 ---
 
 ## Дыра 5. Нечестный провайдер: подмена модели неотличима по протоколу
