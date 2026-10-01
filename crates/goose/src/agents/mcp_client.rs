@@ -399,7 +399,30 @@ impl ClientHandler for GooseClient {
         _context: RequestContext<RoleClient>,
     ) -> Result<rmcp::model::CreateMessageResult, ErrorData> {
         if let Some(handler) = &self.capabilities.sampling_handler {
-            return (handler)(params).await;
+            // A panic inside the handler would kill the rmcp service
+            // task (the whole MCP connection): contain it to one failed
+            // request.
+            return match futures::FutureExt::catch_unwind(std::panic::AssertUnwindSafe((handler)(
+                params,
+            )))
+            .await
+            {
+                Ok(result) => result,
+                Err(panic) => {
+                    let reason = panic
+                        .downcast_ref::<&str>()
+                        .copied()
+                        .map(str::to_owned)
+                        .or_else(|| panic.downcast_ref::<String>().cloned())
+                        .unwrap_or_else(|| "opaque panic payload".to_owned());
+                    tracing::error!(reason = %reason, "sampling handler panicked");
+                    Err(ErrorData::new(
+                        rmcp::model::ErrorCode::INTERNAL_ERROR,
+                        "sampling handler panicked (contained; the connection stays up)",
+                        None,
+                    ))
+                }
+            };
         }
         Err(ErrorData::method_not_found::<
             rmcp::model::CreateMessageRequestMethod,
