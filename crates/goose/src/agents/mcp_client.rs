@@ -395,9 +395,17 @@ impl ClientHandler for GooseClient {
     #[expect(deprecated)]
     async fn create_message(
         &self,
-        params: rmcp::model::CreateMessageRequestParams,
-        _context: RequestContext<RoleClient>,
+        mut params: rmcp::model::CreateMessageRequestParams,
+        context: RequestContext<RoleClient>,
     ) -> Result<rmcp::model::CreateMessageResult, ErrorData> {
+        // rmcp's service loop strips the wire `params._meta` into
+        // `RequestContext.meta` BEFORE the handler sees it (GetMeta):
+        // re-attach it so downstream handlers can read the protocol
+        // metadata (the claw sampling handler's agent-session-id echo
+        // attribution) without knowing the transport shape.
+        if params.meta.is_none() {
+            params.meta = Some(context.meta);
+        }
         if let Some(handler) = &self.capabilities.sampling_handler {
             // A panic inside the handler would kill the rmcp service
             // task (the whole MCP connection): contain it to one failed
@@ -431,9 +439,23 @@ impl ClientHandler for GooseClient {
 
     async fn create_elicitation(
         &self,
-        request: ElicitRequestParams,
+        mut request: ElicitRequestParams,
         context: RequestContext<RoleClient>,
     ) -> Result<ElicitResult, ErrorData> {
+        // Same re-attachment as create_message: rmcp strips the wire
+        // `_meta` into the context before the handler runs. The params
+        // are a tagged enum — set the meta on whichever variant rides.
+        match &mut request {
+            ElicitRequestParams::FormElicitationParams { meta, .. }
+            | ElicitRequestParams::UrlElicitationParams { meta, .. } => {
+                if meta.is_none() {
+                    *meta = Some(context.meta);
+                }
+            }
+            // #[non_exhaustive]: a future variant carries its own meta
+            // discipline; leave it untouched.
+            _ => {}
+        }
         if let Some(handler) = &self.capabilities.elicitation_handler {
             // Same containment as the sampling handler: a panic here
             // would kill the rmcp service task (the connection).
