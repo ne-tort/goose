@@ -435,7 +435,27 @@ impl ClientHandler for GooseClient {
         context: RequestContext<RoleClient>,
     ) -> Result<ElicitResult, ErrorData> {
         if let Some(handler) = &self.capabilities.elicitation_handler {
-            return Ok(handler(&request));
+            // Same containment as the sampling handler: a panic here
+            // would kill the rmcp service task (the connection).
+            return match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                handler(&request)
+            })) {
+                Ok(result) => Ok(result),
+                Err(panic) => {
+                    let reason = panic
+                        .downcast_ref::<&str>()
+                        .copied()
+                        .map(str::to_owned)
+                        .or_else(|| panic.downcast_ref::<String>().cloned())
+                        .unwrap_or_else(|| "opaque panic payload".to_owned());
+                    tracing::error!(reason = %reason, "elicitation handler panicked");
+                    Err(ErrorData::new(
+                        rmcp::model::ErrorCode::INTERNAL_ERROR,
+                        "elicitation handler panicked (contained; the connection stays up)",
+                        None,
+                    ))
+                }
+            };
         }
 
         let session_id = self
