@@ -392,6 +392,20 @@ impl ClientHandler for GooseClient {
         );
     }
 
+    #[expect(deprecated)]
+    async fn create_message(
+        &self,
+        params: rmcp::model::CreateMessageRequestParams,
+        _context: RequestContext<RoleClient>,
+    ) -> Result<rmcp::model::CreateMessageResult, ErrorData> {
+        if let Some(handler) = &self.capabilities.sampling_handler {
+            return (handler)(params).await;
+        }
+        Err(ErrorData::method_not_found::<
+            rmcp::model::CreateMessageRequestMethod,
+        >())
+    }
+
     async fn create_elicitation(
         &self,
         request: ElicitRequestParams,
@@ -463,31 +477,52 @@ impl ClientHandler for GooseClient {
     fn get_info(&self) -> ClientInfo {
         let extensions = self.resolved_extensions();
 
-        InitializeRequestParams::new(
-            #[expect(deprecated)]
-            ClientCapabilities::builder()
-                .enable_roots()
-                .enable_extensions_with(extensions)
-                .enable_elicitation()
-                .build(),
-            self.resolved_client_info(),
-        )
-        .with_protocol_version(
-            self.capabilities
-                .protocol_version
-                .clone()
-                .unwrap_or_default(),
-        )
+        #[expect(deprecated)]
+        let mut client_capabilities = ClientCapabilities::builder()
+            .enable_roots()
+            .enable_extensions_with(extensions)
+            .enable_elicitation()
+            .build();
+        // Sampling is advertised only when a handler is wired: a server
+        // seeing the capability would otherwise send sampling requests
+        // that can only fail with method-not-found.
+        if self.capabilities.sampling_handler.is_some() {
+            client_capabilities.sampling = Some(rmcp::model::SamplingCapability::default());
+        }
+
+        InitializeRequestParams::new(client_capabilities, self.resolved_client_info())
+            .with_protocol_version(
+                self.capabilities
+                    .protocol_version
+                    .clone()
+                    .unwrap_or_default(),
+            )
     }
 }
 
 pub type ElicitationHandler = Arc<dyn Fn(&ElicitRequestParams) -> ElicitResult + Send + Sync>;
+
+/// Client-side sampling handler (MCP `sampling/createMessage`). Unlike
+/// [`ElicitationHandler`] the seam is async, so no thread parking is
+/// needed: the handler returns a boxed future resolved on the calling
+/// runtime.
+#[expect(deprecated)]
+pub type SamplingHandler = Arc<
+    dyn Fn(
+            rmcp::model::CreateMessageRequestParams,
+        ) -> futures::future::BoxFuture<
+            'static,
+            Result<rmcp::model::CreateMessageResult, rmcp::ErrorData>,
+        > + Send
+        + Sync,
+>;
 
 #[derive(Clone, Default)]
 pub struct GooseMcpClientCapabilities {
     pub mcpui: bool,
     pub host_info: Option<GooseMcpHostInfo>,
     pub elicitation_handler: Option<ElicitationHandler>,
+    pub sampling_handler: Option<SamplingHandler>,
     pub protocol_version: Option<ProtocolVersion>,
 }
 
@@ -498,6 +533,7 @@ impl std::fmt::Debug for GooseMcpClientCapabilities {
             .field("mcpui", &self.mcpui)
             .field("host_info", &self.host_info)
             .field("elicitation_handler", &self.elicitation_handler.is_some())
+            .field("sampling_handler", &self.sampling_handler.is_some())
             .field("protocol_version", &self.protocol_version)
             .finish()
     }
@@ -1099,12 +1135,14 @@ mod tests {
                 mcpui: true,
                 host_info: None,
                 elicitation_handler: None,
+                sampling_handler: None,
                 protocol_version: None,
             },
             GoosePlatform::GooseCli => GooseMcpClientCapabilities {
                 mcpui: false,
                 host_info: None,
                 elicitation_handler: None,
+                sampling_handler: None,
                 protocol_version: None,
             },
         };
@@ -1149,6 +1187,7 @@ mod tests {
                 mcpui: false,
                 host_info: None,
                 elicitation_handler: None,
+                sampling_handler: None,
                 protocol_version: None,
             },
             temp_dir.path().to_path_buf(),
@@ -1512,12 +1551,40 @@ mod tests {
         );
     }
 
+    /// Sampling is advertised ONLY when a `sampling_handler` is wired
+    /// (no handler = the pre-capability behavior, servers see no
+    /// sampling support and rmcp answers method-not-found).
     #[test]
-    fn test_client_capabilities_do_not_advertise_sampling() {
+    #[expect(deprecated)]
+    fn test_client_capabilities_advertise_sampling_only_with_a_handler() {
         let client = new_client(GoosePlatform::GooseCli);
         let info = ClientHandler::get_info(&client);
         let capabilities = serde_json::to_value(info.capabilities).unwrap();
         assert!(capabilities.get("sampling").is_none());
+
+        let handler: SamplingHandler = Arc::new(|_params| {
+            Box::pin(async {
+                let result: Result<rmcp::model::CreateMessageResult, ErrorData> =
+                    Err(ErrorData::method_not_found::<
+                        rmcp::model::CreateMessageRequestMethod,
+                    >());
+                result
+            })
+        });
+        let client = GooseClient::new(
+            Arc::new(Mutex::new(Vec::new())),
+            GoosePlatform::GooseCli.to_string(),
+            GooseMcpClientCapabilities {
+                sampling_handler: Some(handler),
+                ..Default::default()
+            },
+            std::env::current_dir().unwrap_or_default(),
+            Arc::new(ActionRequiredManager::new()),
+            Weak::new(),
+        );
+        let info = ClientHandler::get_info(&client);
+        let capabilities = serde_json::to_value(info.capabilities).unwrap();
+        assert!(capabilities.get("sampling").is_some());
     }
 
     #[test]
@@ -1534,6 +1601,7 @@ mod tests {
                     client_version: Some("0.1.0".to_string()),
                 }),
                 elicitation_handler: None,
+                sampling_handler: None,
                 protocol_version: None,
             },
             std::env::current_dir().unwrap_or_default(),
@@ -1568,6 +1636,7 @@ mod tests {
                     client_version: Some("0.1.0".to_string()),
                 }),
                 elicitation_handler: None,
+                sampling_handler: None,
                 protocol_version: None,
             },
             std::env::current_dir().unwrap_or_default(),
@@ -1599,6 +1668,7 @@ mod tests {
                     client_version: Some("0.1.0".to_string()),
                 }),
                 elicitation_handler: None,
+                sampling_handler: None,
                 protocol_version: None,
             },
             std::env::current_dir().unwrap_or_default(),

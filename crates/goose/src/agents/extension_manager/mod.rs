@@ -148,6 +148,7 @@ pub struct ExtensionManagerCapabilities {
     pub mcpui: bool,
     pub host_info: Option<GooseMcpHostInfo>,
     pub elicitation_handler: Option<crate::agents::mcp_client::ElicitationHandler>,
+    pub sampling_handler: Option<crate::agents::mcp_client::SamplingHandler>,
     pub protocol_version: Option<rmcp::model::ProtocolVersion>,
 }
 
@@ -403,6 +404,7 @@ impl ExtensionManager {
             mcpui: self.capabilities.mcpui,
             host_info: self.capabilities.host_info.clone(),
             elicitation_handler: self.capabilities.elicitation_handler.clone(),
+            sampling_handler: self.capabilities.sampling_handler.clone(),
             protocol_version: self.capabilities.protocol_version.clone(),
         }
     }
@@ -443,6 +445,7 @@ impl ExtensionManager {
                 mcpui: false,
                 host_info: None,
                 elicitation_handler: None,
+                sampling_handler: None,
                 protocol_version: None,
             },
             false,

@@ -791,6 +791,7 @@ async fn build_test_pipeline(
             mcpui: false,
             host_info: None,
             elicitation_handler: None,
+            sampling_handler: None,
             protocol_version: None,
         },
         false,

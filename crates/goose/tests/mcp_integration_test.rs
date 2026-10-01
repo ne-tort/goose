@@ -213,6 +213,7 @@ async fn test_replayed_session(
             mcpui: true,
             host_info: None,
             elicitation_handler: None,
+            sampling_handler: None,
             protocol_version: None,
         },
         true,

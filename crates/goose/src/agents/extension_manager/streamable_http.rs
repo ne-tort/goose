@@ -702,6 +702,7 @@ mod tests {
                 mcpui: false,
                 host_info: None,
                 elicitation_handler: None,
+                sampling_handler: None,
                 protocol_version: None,
             },
             working_dir: working_dir.to_path_buf(),
