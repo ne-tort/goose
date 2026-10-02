@@ -207,10 +207,20 @@ impl GooseClient {
 
     async fn set_session_id(&self, session_id: &str) {
         let mut slot = self.session_id.lock().await;
-        assert!(
-            slot.as_deref().is_none_or(|s| s == session_id),
-            "McpClient received requests from different sessions"
-        );
+        // The slot is a FALLBACK for elicitation/sampling attribution when
+        // a request's own `_meta` carries no session id. One client serves
+        // one session in goose-native deployments, but a shared
+        // extension manager (multiple sessions calling tools on the same
+        // MCP server) legitimately interleaves ids — the request `_meta`
+        // stays the primary source, so last-writer-wins with a trace is
+        // the honest degradation (an assert here panics the connection).
+        if slot.as_deref().is_some_and(|s| s != session_id) {
+            tracing::debug!(
+                previous = ?slot,
+                session_id,
+                "McpClient session fallback overwritten (shared manager: multiple sessions)"
+            );
+        }
         *slot = Some(session_id.to_string());
     }
 
