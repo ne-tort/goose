@@ -916,6 +916,12 @@ pub fn get_usage(usage: &Value) -> Usage {
         })
         .map(|v| v as i32);
 
+    let reasoning_tokens = usage
+        .get("completion_tokens_details")
+        .and_then(|d| d.get("reasoning_tokens"))
+        .and_then(|v| v.as_i64())
+        .map(|v| v as i32);
+
     let total_tokens = usage
         .get("total_tokens")
         .and_then(|v| v.as_i64())
@@ -927,6 +933,7 @@ pub fn get_usage(usage: &Value) -> Usage {
 
     Usage::new(input_tokens, output_tokens, total_tokens)
         .with_cache_tokens(cache_read_input_tokens, cache_write_input_tokens)
+        .with_reasoning_tokens(reasoning_tokens)
 }
 
 pub fn get_cost(usage: &Value) -> Option<f64> {
@@ -3628,6 +3635,70 @@ data: [DONE]
         assert_eq!(usage.total_tokens, Some(105));
         assert_eq!(usage.cache_read_input_tokens, Some(60));
         assert_eq!(usage.cache_write_input_tokens, Some(10));
+    }
+
+    #[test]
+    fn test_get_usage_reads_openai_completion_tokens_details() {
+        let usage = get_usage(&json!({
+            "prompt_tokens": 120,
+            "completion_tokens": 30,
+            "total_tokens": 150,
+            "completion_tokens_details": {
+                "reasoning_tokens": 12
+            }
+        }));
+
+        assert_eq!(usage.input_tokens, Some(120));
+        assert_eq!(usage.output_tokens, Some(30));
+        assert_eq!(usage.total_tokens, Some(150));
+        assert_eq!(usage.reasoning_tokens, Some(12));
+        assert_eq!(usage.cache_read_input_tokens, None);
+        assert_eq!(usage.cache_write_input_tokens, None);
+    }
+
+    #[test]
+    fn test_get_usage_reads_nested_usage_with_reasoning_tokens() {
+        let usage = get_usage(&json!({
+            "id": "chatcmpl_test",
+            "object": "chat.completion",
+            "usage": {
+                "prompt_tokens": 84,
+                "completion_tokens": 21,
+                "total_tokens": 105,
+                "prompt_tokens_details": {
+                    "cached_tokens": 60
+                },
+                "completion_tokens_details": {
+                    "reasoning_tokens": 9
+                }
+            }
+        }));
+
+        assert_eq!(usage.input_tokens, Some(84));
+        assert_eq!(usage.output_tokens, Some(21));
+        assert_eq!(usage.total_tokens, Some(105));
+        assert_eq!(usage.cache_read_input_tokens, Some(60));
+        assert_eq!(usage.reasoning_tokens, Some(9));
+    }
+
+    #[test]
+    fn test_get_usage_reasoning_tokens_none_when_details_absent_or_null() {
+        let absent = get_usage(&json!({
+            "prompt_tokens": 120,
+            "completion_tokens": 30,
+            "total_tokens": 150
+        }));
+        assert_eq!(absent.reasoning_tokens, None);
+
+        let null_details = get_usage(&json!({
+            "prompt_tokens": 120,
+            "completion_tokens": 30,
+            "total_tokens": 150,
+            "completion_tokens_details": {
+                "reasoning_tokens": null
+            }
+        }));
+        assert_eq!(null_details.reasoning_tokens, None);
     }
 
     #[tokio::test]

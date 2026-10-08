@@ -23,7 +23,7 @@ use super::formats::anthropic::{
     ANTHROPIC_PROVIDER_NAME, INPUT_TRANSFORMATIONS_FIELD, THINKING_BINDING_CONTROLS_BETA,
 };
 use super::openai_compatible::handle_status;
-use super::retry::ProviderRetry;
+use super::retry::{ProviderRetry, RetryConfig};
 use crate::conversation::message::Message;
 use crate::model::ModelConfig;
 use rmcp::model::Tool;
@@ -50,6 +50,10 @@ pub struct AnthropicProvider {
     skip_canonical_filtering: bool,
     #[serde(skip)]
     format_options: AnthropicFormatOptions,
+    /// Transport-level retry posture (the `Provider::retry_config` hook) —
+    /// see `OpenAiCompatibleProvider::retry_config` for the contract.
+    #[serde(skip)]
+    retry_config: RetryConfig,
 }
 
 /// Builder for [`AnthropicProvider`].
@@ -66,6 +70,7 @@ pub struct AnthropicProviderBuilder {
     dynamic_models: Option<bool>,
     skip_canonical_filtering: bool,
     format_options: AnthropicFormatOptions,
+    retry_config: RetryConfig,
 }
 
 impl AnthropicProviderBuilder {
@@ -78,7 +83,13 @@ impl AnthropicProviderBuilder {
             dynamic_models: None,
             skip_canonical_filtering: false,
             format_options: AnthropicFormatOptions::default(),
+            retry_config: RetryConfig::default(),
         }
+    }
+
+    pub fn retry_config(mut self, retry_config: RetryConfig) -> Self {
+        self.retry_config = retry_config;
+        self
     }
 
     pub fn api_client(mut self, api_client: ApiClient) -> Self {
@@ -138,6 +149,7 @@ impl AnthropicProviderBuilder {
             dynamic_models: self.dynamic_models,
             skip_canonical_filtering: self.skip_canonical_filtering,
             format_options: self.format_options,
+            retry_config: self.retry_config,
         }
     }
 }
@@ -348,6 +360,10 @@ impl ProviderDescriptor for AnthropicProvider {
 impl Provider for AnthropicProvider {
     fn get_name(&self) -> &str {
         &self.name
+    }
+
+    fn retry_config(&self) -> RetryConfig {
+        self.retry_config.clone()
     }
 
     async fn refresh_credentials(&self) -> Result<(), ProviderError> {
@@ -610,6 +626,7 @@ mod tests {
             dynamic_models: Some(true),
             skip_canonical_filtering: false,
             format_options: AnthropicFormatOptions::default(),
+            retry_config: RetryConfig::default(),
         }
     }
 

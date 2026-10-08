@@ -187,6 +187,7 @@ mod tests {
             total_tokens: None,
             cache_read_input_tokens: cache_read,
             cache_write_input_tokens: None,
+            reasoning_tokens: None,
         }
     }
 

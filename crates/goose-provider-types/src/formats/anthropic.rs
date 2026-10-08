@@ -151,6 +151,52 @@ fn canonical_thinking_mode(provider_name: &str, model_name: &str) -> Option<Thin
     maybe_get_canonical_model(provider_name, model_name).and_then(|model| model.thinking_mode)
 }
 
+/// A ModelConfig-DECLARED thinking mode (additive seam): the
+/// `thinking_mode` request param, threaded by an embedding catalog (e.g.
+/// GooseClaw's `meta.thinking_mode`) whose model names the canonical
+/// registry never matches. Vocabulary: `"adaptive"` →
+/// [`ThinkingMode::Adaptive`] (the 2026-generation shape that REJECTS
+/// `thinking.budget_tokens` and emits `thinking:{type:"adaptive"}` +
+/// `output_config:{effort}`); `"budget"`/`"enabled"` →
+/// [`ThinkingMode::Enabled`] (the explicit pre-2026 budget shape). Any
+/// other/absent value → `None` (the canonical registry, then today's
+/// behavior, rules). This NEVER overrides a canonical mode — it only fills
+/// the gap when the registry is silent — so existing consumers that set no
+/// `thinking_mode` param are byte-for-byte unchanged.
+fn declared_thinking_mode(model_config: &ModelConfig) -> Option<ThinkingMode> {
+    model_config
+        .request_param::<String>("thinking_mode")
+        .and_then(|word| match word.as_str() {
+            "adaptive" => Some(ThinkingMode::Adaptive),
+            "budget" | "enabled" => Some(ThinkingMode::Enabled),
+            _ => None,
+        })
+}
+
+/// The accepted [`declared_output_effort`] words — Anthropic's published
+/// `output_config.effort` vocabulary for the 2026-generation adaptive
+/// rows. Closed list: an unknown word is IGNORED (the enum-derived
+/// effort rules), never forwarded — a 400 the embedding catalog could
+/// not diagnose from here.
+pub const OUTPUT_EFFORT_WORDS: [&str; 5] = ["minimal", "low", "medium", "high", "max"];
+
+/// A ModelConfig-DECLARED `output_config.effort` word (additive seam,
+/// the `declared_thinking_mode` precedent): an embedding catalog (e.g.
+/// GooseClaw's utility posture) threads the vendor's effort FLOOR
+/// (`"minimal"`) for a call whose goose thinking effort is absent — a
+/// 2026-generation adaptive row cannot turn reasoning OFF, and an
+/// effort-absent adaptive request otherwise falls through to no
+/// thinking block, which the model reads as "run the full adaptive
+/// default". The declared word also PINS adaptive emission with no
+/// goose effort set (see [`thinking_type_for_provider`]). Absent or
+/// unknown → `None`, and every consumer behaves exactly as before
+/// (byte-identical for callers that set no `output_config_effort`).
+fn declared_output_effort(model_config: &ModelConfig) -> Option<String> {
+    model_config
+        .request_param::<String>("output_config_effort")
+        .filter(|word| OUTPUT_EFFORT_WORDS.contains(&word.as_str()))
+}
+
 /// Adaptive models run adaptive thinking when `thinking` is omitted, so turning
 /// it off takes an explicit disable. Always-on models reject that disable.
 pub fn requires_explicit_thinking_disable(provider_name: &str, model_name: &str) -> bool {
@@ -173,7 +219,12 @@ pub fn thinking_type(model_config: &ModelConfig) -> ThinkingType {
 }
 
 pub fn thinking_type_for_provider(provider_name: &str, model_config: &ModelConfig) -> ThinkingType {
-    let mode = canonical_thinking_mode(provider_name, &model_config.model_name);
+    // The canonical registry's mode wins; a ModelConfig-DECLARED mode
+    // (the additive `thinking_mode` request-param seam) fills the gap for
+    // an embedding catalog whose names the registry never matches. Absent
+    // both, `mode` is `None` and every arm below behaves as before.
+    let mode = canonical_thinking_mode(provider_name, &model_config.model_name)
+        .or_else(|| declared_thinking_mode(model_config));
     let reasoning = model_config
         .reasoning
         .or_else(|| canonical_reasoning(provider_name, model_config));
@@ -183,6 +234,18 @@ pub fn thinking_type_for_provider(provider_name: &str, model_config: &ModelConfi
     }
 
     if mode == Some(ThinkingMode::AlwaysOnAdaptive) {
+        return ThinkingType::Adaptive;
+    }
+
+    // A DECLARED output-effort floor (the additive
+    // `output_config_effort` request-param seam) pins adaptive emission
+    // even with NO goose thinking effort set: an embedding catalog's
+    // utility posture maps "reasoning off" to the vendor's effort FLOOR
+    // ("minimal") — not representable in the goose effort enum, and the
+    // effort-absent fall-through below would answer Disabled (no
+    // thinking block), which an adaptive model reads as "run the full
+    // adaptive default". Absent the param, every arm behaves as before.
+    if mode == Some(ThinkingMode::Adaptive) && declared_output_effort(model_config).is_some() {
         return ThinkingType::Adaptive;
     }
 
@@ -805,7 +868,12 @@ fn apply_thinking_config(
     match thinking_type_for_provider(provider_name, model_config) {
         ThinkingType::Adaptive => {
             obj.insert("thinking".to_string(), json!({"type": "adaptive"}));
-            let effort = adaptive_output_effort(model_config).to_string();
+            // The DECLARED floor word wins (the additive
+            // `output_config_effort` seam — e.g. an embedding catalog's
+            // utility posture pinning "minimal"); absent it, the goose
+            // effort enum maps exactly as before.
+            let effort = declared_output_effort(model_config)
+                .unwrap_or_else(|| adaptive_output_effort(model_config).to_string());
             obj.insert("output_config".to_string(), json!({"effort": effort}));
         }
         ThinkingType::Enabled => {
@@ -1805,6 +1873,174 @@ mod tests {
         assert_eq!(payload["thinking"]["type"], "adaptive");
         assert_eq!(payload["output_config"]["effort"], "high");
         assert!(payload["thinking"].get("budget_tokens").is_none());
+
+        Ok(())
+    }
+
+    /// The additive DECLARED-mode seam (GooseClaw Q-wave §1.5a): a model
+    /// the canonical registry never matches (an embedding catalog's own
+    /// row) still emits adaptive thinking when its `ModelConfig` carries
+    /// the `thinking_mode: "adaptive"` request param — the parent's
+    /// `declared_thinking_mode` fills the gap the canonical lookup leaves.
+    /// Absent the param, an uncataloged name behaves exactly as before.
+    #[test]
+    fn test_declared_thinking_mode_drives_adaptive_for_uncataloged_models() -> Result<()> {
+        let _guard = env_lock::lock_env([("GOOSE_THINKING_EFFORT", None::<&str>)]);
+
+        let mut params = std::collections::HashMap::new();
+        params.insert("thinking_mode".to_string(), json!("adaptive"));
+        params.insert("thinking_effort".to_string(), json!("high"));
+
+        // A name the canonical registry never resolves (the claw catalog
+        // case): reasoning must be declared explicitly, since the
+        // canonical fallback also keys on the registry.
+        let mut config = cfg("claw-custom-anthropic-row");
+        config.reasoning = Some(true);
+        config.max_tokens = Some(4096);
+        config.request_params = Some(params);
+        let messages = vec![Message::user().with_text("Hello")];
+        let payload = create_request_with_default_options(&config, "system", &messages, &[])?;
+
+        assert_eq!(
+            payload["thinking"]["type"], "adaptive",
+            "the declared mode drives adaptive emission for an uncataloged row"
+        );
+        assert_eq!(payload["output_config"]["effort"], "high");
+        assert!(
+            payload["thinking"].get("budget_tokens").is_none(),
+            "adaptive never carries the 400-rejected budget_tokens"
+        );
+
+        // The same uncataloged row WITHOUT the declared param falls back
+        // to today's behavior (reasoning + effort high, no canonical mode
+        // -> the enabled/budget shape), proving the seam is additive.
+        let mut params2 = std::collections::HashMap::new();
+        params2.insert("thinking_effort".to_string(), json!("high"));
+        let mut config2 = cfg("claw-custom-anthropic-row");
+        config2.reasoning = Some(true);
+        config2.max_tokens = Some(4096);
+        config2.request_params = Some(params2);
+        let payload2 = create_request_with_default_options(&config2, "system", &messages, &[])?;
+        assert_eq!(
+            payload2["thinking"]["type"], "enabled",
+            "no declared mode -> the pre-2026 budget shape is unchanged"
+        );
+
+        Ok(())
+    }
+
+    /// The additive block_binding passthrough (GooseClaw Q-wave §1.5b): a
+    /// declared-adaptive row whose `ModelConfig` carries
+    /// `prefix_mismatch_behavior: "drop_block"` (the flag claw sets when
+    /// its sweep edited earlier turns) emits
+    /// `thinking.block_binding.prefix_mismatch_behavior`, which the
+    /// provider's beta-header gate reads back.
+    #[test]
+    fn test_declared_adaptive_with_prefix_mismatch_emits_block_binding() -> Result<()> {
+        let _guard = env_lock::lock_env([("GOOSE_THINKING_EFFORT", None::<&str>)]);
+
+        let mut params = std::collections::HashMap::new();
+        params.insert("thinking_mode".to_string(), json!("adaptive"));
+        params.insert("thinking_effort".to_string(), json!("high"));
+        params.insert("prefix_mismatch_behavior".to_string(), json!("drop_block"));
+
+        let mut config = cfg("claw-custom-anthropic-row");
+        config.reasoning = Some(true);
+        config.max_tokens = Some(4096);
+        config.request_params = Some(params);
+        let messages = vec![Message::user().with_text("Hello")];
+        let payload = create_request_with_default_options(&config, "system", &messages, &[])?;
+
+        assert_eq!(payload["thinking"]["type"], "adaptive");
+        assert_eq!(
+            payload["thinking"]["block_binding"]["prefix_mismatch_behavior"], "drop_block",
+            "an edited prefix on an adaptive row rides block_binding"
+        );
+        // The provider's beta-header gate reads it back.
+        assert_eq!(
+            block_binding_behavior(&payload),
+            Some(PrefixMismatchBehavior::DropBlock)
+        );
+
+        Ok(())
+    }
+
+    /// The additive DECLARED output-effort seam (GooseClaw R-wave §3.3):
+    /// an embedding catalog's utility posture threads
+    /// `output_config_effort: "minimal"` on a declared-adaptive row with
+    /// NO goose thinking effort — the payload pins
+    /// `thinking:{type:"adaptive"}` + `output_config:{effort:"minimal"}`
+    /// (the vendor floor: adaptive rows cannot turn reasoning OFF, and
+    /// an effort-absent request pre-seam emitted no thinking block at
+    /// all, which the model reads as "run the full adaptive default").
+    /// A declared word wins over a present goose effort; an UNKNOWN word
+    /// is ignored; absent the param, behavior is byte-identical.
+    #[test]
+    fn test_declared_output_effort_floor_pins_adaptive_minimal() -> Result<()> {
+        let _guard = env_lock::lock_env([("GOOSE_THINKING_EFFORT", None::<&str>)]);
+
+        let mut params = std::collections::HashMap::new();
+        params.insert("thinking_mode".to_string(), json!("adaptive"));
+        params.insert("output_config_effort".to_string(), json!("minimal"));
+
+        let mut config = cfg("claw-custom-anthropic-row");
+        config.reasoning = Some(true);
+        config.max_tokens = Some(4096);
+        config.request_params = Some(params);
+        let messages = vec![Message::user().with_text("Hello")];
+        let payload = create_request_with_default_options(&config, "system", &messages, &[])?;
+
+        assert_eq!(
+            payload["thinking"]["type"], "adaptive",
+            "the declared floor pins adaptive emission with NO goose effort set"
+        );
+        assert_eq!(payload["output_config"]["effort"], "minimal");
+        assert!(
+            payload["thinking"].get("budget_tokens").is_none(),
+            "adaptive never carries the 400-rejected budget_tokens"
+        );
+
+        // A goose effort ALSO present: the declared word wins (the
+        // utility posture is the explicit statement; the enum is the
+        // Turn-posture path and rides without the param).
+        let mut params2 = std::collections::HashMap::new();
+        params2.insert("thinking_mode".to_string(), json!("adaptive"));
+        params2.insert("thinking_effort".to_string(), json!("high"));
+        params2.insert("output_config_effort".to_string(), json!("minimal"));
+        let mut config2 = cfg("claw-custom-anthropic-row");
+        config2.reasoning = Some(true);
+        config2.max_tokens = Some(4096);
+        config2.request_params = Some(params2);
+        let payload2 = create_request_with_default_options(&config2, "system", &messages, &[])?;
+        assert_eq!(payload2["output_config"]["effort"], "minimal");
+
+        // An UNKNOWN word is ignored (never forwarded — a 400 nobody
+        // could diagnose): the enum path rules.
+        let mut params3 = std::collections::HashMap::new();
+        params3.insert("thinking_mode".to_string(), json!("adaptive"));
+        params3.insert("thinking_effort".to_string(), json!("high"));
+        params3.insert("output_config_effort".to_string(), json!("turbo"));
+        let mut config3 = cfg("claw-custom-anthropic-row");
+        config3.reasoning = Some(true);
+        config3.max_tokens = Some(4096);
+        config3.request_params = Some(params3);
+        let payload3 = create_request_with_default_options(&config3, "system", &messages, &[])?;
+        assert_eq!(payload3["output_config"]["effort"], "high");
+
+        // Absent the param with no goose effort: today's behavior —
+        // effort-absent maps to Disabled, so NO thinking block rides
+        // (the pre-seam byte-identical proof).
+        let mut params4 = std::collections::HashMap::new();
+        params4.insert("thinking_mode".to_string(), json!("adaptive"));
+        let mut config4 = cfg("claw-custom-anthropic-row");
+        config4.reasoning = Some(true);
+        config4.max_tokens = Some(4096);
+        config4.request_params = Some(params4);
+        let payload4 = create_request_with_default_options(&config4, "system", &messages, &[])?;
+        assert!(
+            payload4.get("thinking").is_none(),
+            "absent the floor param, an effort-less adaptive row behaves as before"
+        );
 
         Ok(())
     }

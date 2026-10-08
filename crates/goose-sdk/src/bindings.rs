@@ -546,7 +546,7 @@ impl Usage {
             total_tokens: usage.usage.total_tokens,
             cache_read_input_tokens: usage.usage.cache_read_input_tokens,
             cache_creation_input_tokens: usage.usage.cache_write_input_tokens,
-            reasoning_tokens: None,
+            reasoning_tokens: usage.usage.reasoning_tokens,
             model: usage.model.clone(),
             provider_metadata_json: Some(serde_json::to_string(usage)?),
             additional_data_json: usage

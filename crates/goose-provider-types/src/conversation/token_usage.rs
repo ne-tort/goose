@@ -98,6 +98,11 @@ pub struct Usage {
     pub total_tokens: Option<i32>,
     pub cache_read_input_tokens: Option<i32>,
     pub cache_write_input_tokens: Option<i32>,
+    /// Tokens the provider reports as reasoning/thinking output (OpenAI
+    /// `completion_tokens_details.reasoning_tokens`); a subset of
+    /// `output_tokens`. Anthropic does not separate them — thinking tokens
+    /// arrive inside `output_tokens`, so the field stays None there.
+    pub reasoning_tokens: Option<i32>,
 }
 
 fn sum_optionals<T>(a: Option<T>, b: Option<T>) -> Option<T>
@@ -128,6 +133,7 @@ impl Add for Usage {
                 other.cache_write_input_tokens,
             ),
         )
+        .with_reasoning_tokens(sum_optionals(self.reasoning_tokens, other.reasoning_tokens))
     }
 }
 
@@ -160,6 +166,7 @@ impl Usage {
             total_tokens: calculated_total,
             cache_read_input_tokens: None,
             cache_write_input_tokens: None,
+            reasoning_tokens: None,
         }
     }
 
@@ -170,6 +177,11 @@ impl Usage {
     ) -> Self {
         self.cache_read_input_tokens = cache_read_input_tokens;
         self.cache_write_input_tokens = cache_write_input_tokens;
+        self
+    }
+
+    pub fn with_reasoning_tokens(mut self, reasoning_tokens: Option<i32>) -> Self {
+        self.reasoning_tokens = reasoning_tokens;
         self
     }
 
@@ -284,5 +296,33 @@ mod tests {
         assert_eq!(combined.total_tokens, Some(178));
         assert_eq!(combined.cache_read_input_tokens, Some(14));
         assert_eq!(combined.cache_write_input_tokens, Some(6));
+    }
+
+    #[test]
+    fn test_usage_with_reasoning_tokens_roundtrip() -> Result<()> {
+        assert_eq!(
+            Usage::new(Some(10), Some(20), Some(30)).reasoning_tokens,
+            None
+        );
+
+        let usage = Usage::new(Some(10), Some(20), Some(30)).with_reasoning_tokens(Some(7));
+
+        assert_eq!(usage.reasoning_tokens, Some(7));
+
+        let serialized = serde_json::to_string(&usage)?;
+        let deserialized: Usage = serde_json::from_str(&serialized)?;
+        assert_eq!(deserialized.reasoning_tokens, Some(7));
+        assert_eq!(usage, deserialized);
+        Ok(())
+    }
+
+    #[test]
+    fn test_usage_addition_includes_reasoning_tokens() {
+        let usage_a = Usage::new(Some(100), Some(20), Some(120)).with_reasoning_tokens(Some(15));
+        let usage_b = Usage::new(Some(50), Some(8), Some(58)).with_reasoning_tokens(Some(5));
+
+        let combined = usage_a + usage_b;
+
+        assert_eq!(combined.reasoning_tokens, Some(20));
     }
 }

@@ -15,7 +15,7 @@ use tokio_util::io::StreamReader;
 
 use super::api_client::ApiClient;
 use super::base::{stream_from_single_message, MessageStream, Provider};
-use super::retry::ProviderRetry;
+use super::retry::{ProviderRetry, RetryConfig};
 use crate::conversation::message::Message;
 use crate::errors::ProviderError;
 use crate::formats::openai::{
@@ -35,6 +35,11 @@ pub struct OpenAiCompatibleProvider {
     /// Path prefix prepended to `chat/completions` (e.g. `"deployments/{name}/"` for Azure).
     completions_prefix: String,
     supports_streaming: bool,
+    /// Transport-level retry posture (the `Provider::retry_config` hook).
+    /// Embedders with their own visible retry ladder (e.g. GooseClaw's
+    /// turn runner) set `transient_only()` so this layer never silently
+    /// re-sends 4xx under their accounting.
+    retry_config: RetryConfig,
 }
 
 impl OpenAiCompatibleProvider {
@@ -44,7 +49,13 @@ impl OpenAiCompatibleProvider {
             api_client,
             completions_prefix,
             supports_streaming: true,
+            retry_config: RetryConfig::default(),
         }
+    }
+
+    pub fn with_retry_config(mut self, retry_config: RetryConfig) -> Self {
+        self.retry_config = retry_config;
+        self
     }
 
     pub fn with_supports_streaming(mut self, supports_streaming: bool) -> Self {
@@ -171,6 +182,10 @@ impl OpenAiCompatibleProvider {
 impl Provider for OpenAiCompatibleProvider {
     fn get_name(&self) -> &str {
         &self.name
+    }
+
+    fn retry_config(&self) -> RetryConfig {
+        self.retry_config.clone()
     }
 
     async fn refresh_credentials(&self) -> Result<(), ProviderError> {
