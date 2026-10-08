@@ -464,11 +464,23 @@ fn format_messages_with_options(
                                 Value::String(text_parts.join("\n"))
                             };
 
-                            content.push(json!({
+                            // An `Ok` CallToolResult may still be a LOGICAL
+                            // error (`is_error: Some(true)` — claw passes
+                            // `CallToolResult::error(..)` for a tool that ran
+                            // and failed). Anthropic's tool_result supports
+                            // `is_error`; emit it so the model is told the
+                            // result IS an error, not merely a payload that
+                            // happens to describe one. Byte-identical when
+                            // is_error is false/None (the field stays absent).
+                            let mut block = json!({
                                 TYPE_FIELD: TOOL_RESULT_TYPE,
                                 TOOL_USE_ID_FIELD: tool_response.id,
                                 CONTENT_FIELD: content_value
-                            }));
+                            });
+                            if result.is_error == Some(true) {
+                                block[IS_ERROR_FIELD] = Value::Bool(true);
+                            }
+                            content.push(block);
                         }
                         Err(tool_error) => {
                             content.push(json!({
@@ -3391,6 +3403,64 @@ mod tests {
                 vec![(2, 0), (4, 0)],
                 "message breakpoints should sit on the last block of the last two user messages"
             );
+        }
+
+        #[test]
+        fn tool_result_is_error_flag_rides_the_ok_arm() -> Result<()> {
+            // The Ok arm may still be a LOGICAL error (`is_error:
+            // Some(true)` — claw passes `CallToolResult::error(..)`). The
+            // flag must reach Anthropic so the model is told the result IS
+            // an error; and it must be ABSENT when the result is fine.
+            let messages = vec![
+                Message::assistant().with_tool_request(
+                    "tool_err",
+                    Ok(CallToolRequestParams::new("run").with_arguments(object!({"cmd": "false"}))),
+                ),
+                Message::user().with_tool_response(
+                    "tool_err",
+                    Ok(CallToolResult::error(vec![
+                        rmcp::model::ContentBlock::text("command failed"),
+                    ])),
+                ),
+                Message::assistant().with_tool_request(
+                    "tool_ok",
+                    Ok(CallToolRequestParams::new("run").with_arguments(object!({"cmd": "true"}))),
+                ),
+                Message::user().with_tool_response(
+                    "tool_ok",
+                    Ok(CallToolResult::success(vec![
+                        rmcp::model::ContentBlock::text("ok"),
+                    ])),
+                ),
+            ];
+            let req = create_request_with_default_options(
+                &cfg("claude-sonnet-4-5"),
+                "sys",
+                &messages,
+                &[],
+            )?;
+            let req_messages = req["messages"].as_array().unwrap();
+            let mut err_flag = None;
+            let mut ok_flag = None;
+            for message in req_messages {
+                for block in message["content"].as_array().unwrap() {
+                    match block.get("tool_use_id").and_then(|v| v.as_str()) {
+                        Some("tool_err") => err_flag = block.get(IS_ERROR_FIELD).cloned(),
+                        Some("tool_ok") => ok_flag = block.get(IS_ERROR_FIELD).cloned(),
+                        _ => {}
+                    }
+                }
+            }
+            assert_eq!(
+                err_flag,
+                Some(json!(true)),
+                "an is_error result carries the flag"
+            );
+            assert!(
+                ok_flag.is_none(),
+                "a successful result omits the flag (byte-identical)"
+            );
+            Ok(())
         }
 
         #[test]
